@@ -60,6 +60,9 @@ jobs:
         with:
           r-version: "4.5"
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq libsodium-dev libcurl4-openssl-dev libssl-dev
-      - run: Rscript -e 'install.packages(c("jsonlite", "openssl", "httr2"), repos = "https://cloud.r-project.org")'
+      - run: Rscript -e 'install.packages(c("jsonlite", "openssl", "httr2", "sodium"), repos = "https://cloud.r-project.org")'
+      # The verdifax R SDK at the release the demo is written against; the
+      # tag is held equal to the SDK's version by Verdifax's checks (R139).
+      - run: curl -sSL -o verdifax-sdk-r.tar.gz https://github.com/Verdifax/verdifax-sdk-r/archive/refs/tags/v1.5.0.tar.gz && tar xzf verdifax-sdk-r.tar.gz && R CMD INSTALL verdifax-sdk-r-1.5.0
       - run: Rscript -e 'invisible(parse("r/claims-review.R"))'
       - run: Rscript r/test-claims-review.R

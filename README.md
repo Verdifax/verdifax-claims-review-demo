@@ -14,7 +14,7 @@ The same program is here in Python, Node, Go and R, built on the Verdifax SDK in
 
 ## What happens in one review
 
-1. **Intake.** One sealed step records the draft's SHA-256, its size and the rule set's hash. A draft marked `CONFIDENTIAL` or above is refused here by the account policy, so it never reaches an outside model; the refusal is sealed as a receipt.
+1. **Intake.** One sealed step records the draft's SHA-256, its size and the rule set's hash. A draft marked `CONFIDENTIAL` or above is refused here by the account policy, so it never reaches an outside model; the refusal is sealed as a receipt. A refusal at any later step, by the account policy or by the server's own content screen, stops the job the same way: the refusal is sealed as a receipt, the steps sealed before it are kept beside it, and the job never gets a verdict.
 2. **Fifteen rule steps**, one per rule, each a branch after intake. The model is sent the draft and one rule and answers in a fixed form, `{verdict, reason}`. Each step seals the rule, the answer, the model that answered (as the API's response named it), the prompt's hash and the model's exact answer, which Verdifax's own AI review also reads.
 3. **Verdict.** A final step joins all fifteen branches: pass only when every rule passed. No model call; the verdict is computed from the answers. A missing, extra or reordered step breaks the job.
 4. **Sign-off.** A person holding the approver key signs approve or reject on the verdict, or rejects a refusal's receipt.
@@ -57,12 +57,14 @@ Rscript /path/to/verdifax-claims-review-demo/r/claims-review.R setup
 Rscript /path/to/verdifax-claims-review-demo/r/claims-review.R review draft.md
 ```
 
+The commands are the same in every language, and so are the files: a folder set up by one program is used by any other, so `setup` runs once per account however many of the programs you use.
+
 The commands are the same in every language:
 
 | Command | Does |
 |---|---|
 | `setup` | Registers the owner's request key, creates the agent's key and a feed key, registers an approver key generated on this machine, and activates the account policy in [policy/claims-review-v1.json](policy/claims-review-v1.json). Runs once per account and folder. |
-| `review DRAFT.md [--model ID]` | Runs one job on the draft and writes its records to `records/<job_id>/`, with the exact payload bytes beside them, so a reader recomputes every sealed payload hash. Prints the verdict, the measured model use and the verify commands. A confidential draft is refused at intake and its receipt written to `records/refused-<time>/`. |
+| `review DRAFT.md [--model ID]` | Runs one job on the draft and writes its records to `records/<job_id>/`, with the exact payload bytes beside them, so a reader recomputes every sealed payload hash. Prints the verdict, the measured model use and the verify commands. A refused step, at intake or later, stops the job: its receipt, the records sealed before it and every payload go to `records/refused-<run_id>/`, and `job.json` there names the step. |
 | `sign-off JOB_ID approve\|reject [--note TEXT]` | Signs the decision on the job's verdict with the approver key. Only the note's hash is sent. |
 | `sign-off --receipt RUN_ID reject` | Signs a decision on a refusal's receipt. |
 | `feed` | Reads the account's whole signal feed with the feed key into `signals.json`. |

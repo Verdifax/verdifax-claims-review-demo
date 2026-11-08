@@ -386,16 +386,7 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string) {
 		// The account policy refused the draft at intake (for example a
 		// confidential draft), so it never reached a model. The refusal is
 		// sealed as a receipt; nothing else runs for this draft.
-		refused := newestRefusal(ctx, agent)
-		folder := filepath.Join("records", "refused-"+now)
-		receipt, receiptErr := agent.GetDenyReceipt(ctx, refused)
-		must(receiptErr)
-		writeJSON(filepath.Join(folder, "receipt.json"), receipt)
-		writeText(filepath.Join(folder, "payloads", "intake.json"), canonical(intakePayload))
-		writeJSON(filepath.Join(folder, "job.json"), map[string]any{"refused_run_id": refused, "draft": draftPath,
-			"draft_sha256": draftHash, "reason": apiErr.Message})
-		fmt.Printf("refused at intake: run %d, %s\n", refused, apiErr.Message)
-		fmt.Printf("records in %s\n", folder)
+		refuse(ctx, agent, jobID, "intake", map[string]int64{}, map[string]any{"intake": intakePayload}, draftPath, draftHash, apiErr.Message)
 		return
 	}
 	must(intakeErr)
@@ -427,6 +418,15 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string) {
 			AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "model_provider": "anthropic", "model_name": a.Model,
 				"prompt_hash": promptHash, "decision_kind": "claims.rule_check", "decision_result": a.Verdict},
 			PolicyContext: policyContext(r.ID, level)}, verdifax.WithAfter("intake"))
+		if errors.As(stepErr, &apiErr) {
+			// The account policy or the server's content screen refused this
+			// step, so the job stops here: the refusal is sealed as a receipt,
+			// the steps already sealed are kept beside it, and a person sees
+			// the stop. The job never gets a verdict.
+			payloads[r.ID] = payload
+			refuse(ctx, agent, jobID, r.ID, runIDs, payloads, draftPath, draftHash, apiErr.Message)
+			return
+		}
 		must(stepErr)
 		payloads[r.ID] = payload
 		runIDs[r.ID] = receipt.RunID
@@ -480,14 +480,39 @@ func newestRefusal(ctx context.Context, agent *verdifax.Client) int64 {
 	must(exportErr)
 	var newest int64
 	for _, row := range export.Runs {
-		if row.Status == "pepg_deny" && row.RouteID == routeIntake && row.RunID > newest {
+		if row.Status == "pepg_deny" && row.RunID > newest {
 			newest = row.RunID
 		}
 	}
 	if newest == 0 {
-		fail("the intake was refused but no refused run is listed for this key")
+		fail("the step was refused but no refused run is listed for this key")
 	}
 	return newest
+}
+
+// refuse records a refused step: its sealed receipt, every record the job
+// sealed before it, the exact payload bytes of every step including the
+// refused one, and a summary naming the step. The same for intake and for
+// any later step.
+func refuse(ctx context.Context, agent *verdifax.Client, jobID, step string, runIDs map[string]int64, payloads map[string]any,
+	draftPath, draftHash, reason string) {
+	refused := newestRefusal(ctx, agent)
+	folder := filepath.Join("records", fmt.Sprintf("refused-%d", refused)) // named by the run, so two refusals never share a folder
+	receipt, receiptErr := agent.GetDenyReceipt(ctx, refused)
+	must(receiptErr)
+	writeJSON(filepath.Join(folder, "receipt.json"), receipt)
+	for sealedStep, runID := range runIDs {
+		artifacts, artifactsErr := agent.GetRunArtifacts(ctx, runID)
+		must(artifactsErr)
+		writeText(filepath.Join(folder, sealedStep+".json"), string(artifacts))
+	}
+	for name, payload := range payloads {
+		writeText(filepath.Join(folder, "payloads", name+".json"), canonical(payload))
+	}
+	writeJSON(filepath.Join(folder, "job.json"), map[string]any{"refused_run_id": refused, "step": step, "job_id": jobID,
+		"draft": draftPath, "draft_sha256": draftHash, "reason": reason, "run_ids": runIDs})
+	fmt.Printf("refused at %s: run %d, %s\n", step, refused, reason)
+	fmt.Printf("records in %s\n", folder)
 }
 
 func saveJobRecords(ctx context.Context, agent *verdifax.Client, jobID, out string, runIDs map[string]int64, payloads map[string]any) {

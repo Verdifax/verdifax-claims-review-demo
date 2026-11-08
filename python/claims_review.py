@@ -234,15 +234,7 @@ def cmd_review(args: argparse.Namespace) -> None:
         # The account policy refused the draft at intake (for example a
         # confidential draft), so it never reached a model. The refusal is
         # sealed as a receipt; nothing else runs for this draft.
-        refused = newest_refusal(agent)
-        folder = Path("records") / ("refused-%s" % now)
-        write_json(folder / "receipt.json", agent.get_deny_receipt(refused))
-        (folder / "payloads").mkdir(parents=True, exist_ok=True)
-        (folder / "payloads" / "intake.json").write_text(canonical(intake_payload), encoding="utf-8")
-        write_json(folder / "job.json", {"refused_run_id": refused, "draft": str(draft_path), "draft_sha256": draft_hash,
-                                         "reason": exc.message})
-        print("refused at intake: run %d, %s" % (refused, exc.message))
-        print("records in %s" % folder)
+        refuse(agent, job_id, "intake", {}, {"intake": intake_payload}, str(draft_path), draft_hash, exc.message)
         return
     payloads["intake"] = intake_payload
     run_ids = {"intake": intake.run_id}
@@ -260,12 +252,21 @@ def cmd_review(args: argparse.Namespace) -> None:
         payload = {"form": FORM, "step": rule["id"], "rule_id": rule["id"], "rule_text": rule["text"], "draft_sha256": draft_hash,
                    "rule_set_hash": rule_set_hash, "model": answer["model"], "model_response_id": answer["response_id"],
                    "prompt_hash": prompt_hash, "verdict": answer["verdict"], "reason": answer["reason"]}
-        receipt = job.step(rule["id"], after=["intake"], payload=canonical(payload), program_id=PROGRAM_ID, route_id=ROUTE_RULE,
-                           registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer["raw"] or answer["reason"],
-                           attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
-                                                                     model_name=answer["model"], prompt_hash=prompt_hash,
-                                                                     decision_kind="claims.rule_check", decision_result=answer["verdict"]),
-                           policy_context={"object_type": "text", "object_id": OBJECT_PREFIX + rule["id"], "classification": level})
+        try:
+            receipt = job.step(rule["id"], after=["intake"], payload=canonical(payload), program_id=PROGRAM_ID, route_id=ROUTE_RULE,
+                               registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer["raw"] or answer["reason"],
+                               attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
+                                                                         model_name=answer["model"], prompt_hash=prompt_hash,
+                                                                         decision_kind="claims.rule_check", decision_result=answer["verdict"]),
+                               policy_context={"object_type": "text", "object_id": OBJECT_PREFIX + rule["id"], "classification": level})
+        except APIError as exc:
+            # The account policy or the server's content screen refused this
+            # step, so the job stops here: the refusal is sealed as a receipt,
+            # the steps already sealed are kept beside it, and a person sees
+            # the stop. The job never gets a verdict.
+            payloads[rule["id"]] = payload
+            refuse(agent, job_id, rule["id"], run_ids, payloads, str(draft_path), draft_hash, exc.message)
+            return
         payloads[rule["id"]] = payload
         run_ids[rule["id"]] = receipt.run_id
         results.append({"rule_id": rule["id"], "verdict": answer["verdict"], "reason": answer["reason"]})
@@ -296,10 +297,30 @@ def cmd_review(args: argparse.Namespace) -> None:
 
 
 def newest_refusal(agent: verdifax.VerdifaxClient) -> int:
-    rows = [r for r in agent.export_runs().runs if r.status == "pepg_deny" and r.route_id == ROUTE_INTAKE]
+    rows = [r for r in agent.export_runs().runs if r.status == "pepg_deny"]
     if not rows:
-        fail("the intake was refused but no refused run is listed for this key")
+        fail("the step was refused but no refused run is listed for this key")
     return max(r.run_id for r in rows)
+
+
+def refuse(agent: verdifax.VerdifaxClient, job_id: str, step: str, run_ids: dict[str, int], payloads: dict[str, Any],
+           draft: str, draft_hash: str, reason: str) -> None:
+    """Record a refused step: its sealed receipt, every record the job sealed
+    before it, the exact payload bytes of every step including the refused
+    one, and a summary naming the step. The same for intake and for any
+    later step."""
+    refused = newest_refusal(agent)
+    folder = Path("records") / ("refused-%d" % refused)  # named by the run, so two refusals never share a folder
+    write_json(folder / "receipt.json", agent.get_deny_receipt(refused))
+    for sealed_step, run_id in run_ids.items():
+        (folder / ("%s.json" % sealed_step)).write_text(agent.get_run_artifacts(run_id), encoding="utf-8")
+    (folder / "payloads").mkdir(parents=True, exist_ok=True)
+    for name, payload in payloads.items():
+        (folder / "payloads" / ("%s.json" % name)).write_text(canonical(payload), encoding="utf-8")
+    write_json(folder / "job.json", {"refused_run_id": refused, "step": step, "job_id": job_id, "draft": draft,
+                                     "draft_sha256": draft_hash, "reason": reason, "run_ids": run_ids})
+    print("refused at %s: run %d, %s" % (step, refused, reason))
+    print("records in %s" % folder)
 
 
 def save_job_records(agent: verdifax.VerdifaxClient, job_id: str, out: Path, run_ids: dict[str, int], payloads: dict[str, Any]) -> None:

@@ -225,14 +225,7 @@ async function cmdReview(draftPath, model, answersPath) {
     // The account policy refused the draft at intake (for example a
     // confidential draft), so it never reached a model. The refusal is
     // sealed as a receipt; nothing else runs for this draft.
-    const refused = await newestRefusal(agent);
-    const folder = join("records", `refused-${now}`);
-    writeJSON(join(folder, "receipt.json"), await agent.getDenyReceipt(refused));
-    mkdirSync(join(folder, "payloads"), { recursive: true });
-    writeFileSync(join(folder, "payloads", "intake.json"), canonical(intakePayload));
-    writeJSON(join(folder, "job.json"), { refused_run_id: refused, draft: draftPath, draft_sha256: draftHash, reason: err.message });
-    console.log(`refused at intake: run ${refused}, ${err.message}`);
-    console.log(`records in ${folder}`);
+    await refuse(agent, jobId, "intake", {}, { intake: intakePayload }, draftPath, draftHash, err.message);
     return;
   }
   payloads.intake = intakePayload;
@@ -252,15 +245,27 @@ async function cmdReview(draftPath, model, answersPath) {
       form: FORM, step: rule.id, rule_id: rule.id, rule_text: rule.text, draft_sha256: draftHash, rule_set_hash: ruleSetHash,
       model: answer.model, model_response_id: answer.responseId, prompt_hash: promptHash, verdict: answer.verdict, reason: answer.reason,
     };
-    const receipt = await job.step(rule.id, {
-      after: ["intake"], payload_text: canonical(payload), program_id: PROGRAM_ID, route_id: ROUTE_RULE,
-      registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answer.raw || answer.reason,
-      attested_context: {
-        attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: answer.model, prompt_hash: promptHash,
-        decision_kind: "claims.rule_check", decision_result: answer.verdict,
-      },
-      policy_context: policy(rule.id),
-    });
+    let receipt;
+    try {
+      receipt = await job.step(rule.id, {
+        after: ["intake"], payload_text: canonical(payload), program_id: PROGRAM_ID, route_id: ROUTE_RULE,
+        registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answer.raw || answer.reason,
+        attested_context: {
+          attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: answer.model, prompt_hash: promptHash,
+          decision_kind: "claims.rule_check", decision_result: answer.verdict,
+        },
+        policy_context: policy(rule.id),
+      });
+    } catch (err) {
+      if (!(err instanceof APIError)) throw err;
+      // The account policy or the server's content screen refused this
+      // step, so the job stops here: the refusal is sealed as a receipt,
+      // the steps already sealed are kept beside it, and a person sees
+      // the stop. The job never gets a verdict.
+      payloads[rule.id] = payload;
+      await refuse(agent, jobId, rule.id, runIds, payloads, draftPath, draftHash, err.message);
+      return;
+    }
     payloads[rule.id] = payload;
     runIds[rule.id] = receipt.run_id;
     results.push({ rule_id: rule.id, verdict: answer.verdict, reason: answer.reason });
@@ -297,9 +302,25 @@ async function cmdReview(draftPath, model, answersPath) {
 }
 
 async function newestRefusal(agent) {
-  const rows = (await agent.exportRuns()).runs.filter((r) => r.status === "pepg_deny" && r.route_id === ROUTE_INTAKE);
-  if (rows.length === 0) fail("the intake was refused but no refused run is listed for this key");
+  const rows = (await agent.exportRuns()).runs.filter((r) => r.status === "pepg_deny");
+  if (rows.length === 0) fail("the step was refused but no refused run is listed for this key");
   return Math.max(...rows.map((r) => r.run_id));
+}
+
+// Record a refused step: its sealed receipt, every record the job sealed
+// before it, the exact payload bytes of every step including the refused
+// one, and a summary naming the step. The same for intake and for any
+// later step.
+async function refuse(agent, jobId, step, runIds, payloads, draftPath, draftHash, reason) {
+  const refused = await newestRefusal(agent);
+  const folder = join("records", `refused-${refused}`); // named by the run, so two refusals never share a folder
+  writeJSON(join(folder, "receipt.json"), await agent.getDenyReceipt(refused));
+  for (const [sealedStep, runId] of Object.entries(runIds)) writeFileSync(join(folder, `${sealedStep}.json`), await agent.getRunArtifacts(runId));
+  mkdirSync(join(folder, "payloads"), { recursive: true });
+  for (const [name, payload] of Object.entries(payloads)) writeFileSync(join(folder, "payloads", `${name}.json`), canonical(payload));
+  writeJSON(join(folder, "job.json"), { refused_run_id: refused, step, job_id: jobId, draft: draftPath, draft_sha256: draftHash, reason, run_ids: runIds });
+  console.log(`refused at ${step}: run ${refused}, ${reason}`);
+  console.log(`records in ${folder}`);
 }
 
 async function saveJobRecords(agent, jobId, out, runIds, payloads) {

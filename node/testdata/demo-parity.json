@@ -25,9 +25,10 @@
         "records/<job_id>/<step>.json",
         "records/<job_id>/payloads/<step>.json",
         "records/<job_id>/job.json",
-        "records/refused-<time>/receipt.json",
-        "records/refused-<time>/payloads/intake.json",
-        "records/refused-<time>/job.json"
+        "records/refused-<run_id>/receipt.json",
+        "records/refused-<run_id>/<step>.json (every step sealed before the refusal)",
+        "records/refused-<run_id>/payloads/<step>.json (every step, the refused one included)",
+        "records/refused-<run_id>/job.json"
       ]
     },
     "sign-off": {
@@ -160,5 +161,14 @@
     "measured_tokens",
     "measured_cost_usd"
   ],
-  "prompt_hash": "sha256 of the prompt file's bytes, a newline, and the user text 'Rule <id>: <text>\\n\\nDraft:\\n<draft>'"
+  "prompt_hash": "sha256 of the prompt file's bytes, a newline, and the user text 'Rule <id>: <text>\\n\\nDraft:\\n<draft>'",
+  "refused_summary_fields": [
+    "refused_run_id",
+    "step",
+    "job_id",
+    "draft",
+    "draft_sha256",
+    "reason",
+    "run_ids"
+  ]
 }

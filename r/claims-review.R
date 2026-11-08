@@ -236,17 +236,7 @@ cmd_review <- function(draft_path, model, answers_path) {
     # The account policy refused the draft at intake (for example a
     # confidential draft), so it never reached a model. The refusal is
     # sealed as a receipt; nothing else runs for this draft.
-    refused <- newest_refusal(agent)
-    folder <- file.path("records", paste0("refused-", now))
-    write_json(file.path(folder, "receipt.json"), verdifax_get_deny_receipt(agent, refused))
-    write_text(file.path(folder, "payloads", "intake.json"), canonical(intake_payload))
-    # The server's own message rides in the error's body; the headline is
-    # only the HTTP status.
-    reason <- if (length(intake$body) > 0) paste(intake$body, collapse = " ") else conditionMessage(intake)
-    write_json(file.path(folder, "job.json"), list(refused_run_id = refused, draft = draft_path, draft_sha256 = draft_hash,
-                                                   reason = reason))
-    cat(sprintf("refused at intake: run %d, %s\n", refused, reason))
-    cat(sprintf("records in %s\n", folder))
+    refuse(agent, job_id, "intake", empty_object(), list(intake = intake_payload), draft_path, draft_hash, error_reason(intake))
     return(invisible(NULL))
   }
   payloads$intake <- intake_payload
@@ -266,12 +256,23 @@ cmd_review <- function(draft_path, model, answers_path) {
                     rule_set_hash = rule_set_hash, model = answer$model, model_response_id = answer$response_id,
                     prompt_hash = prompt_hash, verdict = answer$verdict, reason = answer$reason)
     ai_text <- if (nzchar(answer$raw)) answer$raw else answer$reason
-    receipt <- verdifax_job_step(job, rule$id, after = list("intake"), payload = canonical(payload), program_id = PROGRAM_ID,
-                                 route_id = ROUTE_RULE, registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = ai_text,
-                                 attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
-                                                         model_name = answer$model, prompt_hash = prompt_hash,
-                                                         decision_kind = "claims.rule_check", decision_result = answer$verdict),
-                                 policy_context = policy_context(rule$id, level))
+    receipt <- tryCatch(
+      verdifax_job_step(job, rule$id, after = list("intake"), payload = canonical(payload), program_id = PROGRAM_ID,
+                        route_id = ROUTE_RULE, registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = ai_text,
+                        attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
+                                                model_name = answer$model, prompt_hash = prompt_hash,
+                                                decision_kind = "claims.rule_check", decision_result = answer$verdict),
+                        policy_context = policy_context(rule$id, level)),
+      httr2_http = function(e) e)
+    if (inherits(receipt, "error")) {
+      # The account policy or the server's content screen refused this
+      # step, so the job stops here: the refusal is sealed as a receipt,
+      # the steps already sealed are kept beside it, and a person sees
+      # the stop. The job never gets a verdict.
+      payloads[[rule$id]] <- payload
+      refuse(agent, job_id, rule$id, run_ids, payloads, draft_path, draft_hash, error_reason(receipt))
+      return(invisible(NULL))
+    }
     payloads[[rule$id]] <- payload
     run_ids[[rule$id]] <- receipt$run_id
     results[[length(results) + 1]] <- list(rule_id = rule$id, verdict = answer$verdict, reason = answer$reason)
@@ -307,9 +308,34 @@ cmd_review <- function(draft_path, model, answers_path) {
 
 newest_refusal <- function(agent) {
   rows <- verdifax_export_runs(agent)$runs
-  ids <- unlist(lapply(rows, function(r) if (identical(r$status, "pepg_deny") && identical(r$route_id, ROUTE_INTAKE)) r$run_id else NULL))
-  if (length(ids) == 0) fail("the intake was refused but no refused run is listed for this key")
+  ids <- unlist(lapply(rows, function(r) if (identical(r$status, "pepg_deny")) r$run_id else NULL))
+  if (length(ids) == 0) fail("the step was refused but no refused run is listed for this key")
   max(ids)
+}
+
+# The server's own message rides in the error's body; the headline is only
+# the HTTP status.
+error_reason <- function(e) if (length(e$body) > 0) paste(e$body, collapse = " ") else conditionMessage(e)
+
+# An empty JSON object ({}), as the other programs write an empty run_ids.
+empty_object <- function() structure(list(), names = character(0))
+
+# Record a refused step: its sealed receipt, every record the job sealed
+# before it, the exact payload bytes of every step including the refused
+# one, and a summary naming the step. The same for intake and for any
+# later step.
+refuse <- function(agent, job_id, step, run_ids, payloads, draft_path, draft_hash, reason) {
+  refused <- newest_refusal(agent)
+  folder <- file.path("records", paste0("refused-", refused))  # named by the run, so two refusals never share a folder
+  write_json(file.path(folder, "receipt.json"), verdifax_get_deny_receipt(agent, refused))
+  for (sealed_step in names(run_ids)) {
+    write_text(file.path(folder, paste0(sealed_step, ".json")), verdifax_get_run_artifacts(agent, run_ids[[sealed_step]]))
+  }
+  for (name in names(payloads)) write_text(file.path(folder, "payloads", paste0(name, ".json")), canonical(payloads[[name]]))
+  write_json(file.path(folder, "job.json"), list(refused_run_id = refused, step = step, job_id = job_id, draft = draft_path,
+                                                 draft_sha256 = draft_hash, reason = reason, run_ids = run_ids))
+  cat(sprintf("refused at %s: run %d, %s\n", step, refused, reason))
+  cat(sprintf("records in %s\n", folder))
 }
 
 save_job_records <- function(agent, job_id, out, run_ids, payloads) {

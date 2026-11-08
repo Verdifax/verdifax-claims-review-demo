@@ -18,9 +18,10 @@ The same program is here in Python, Node, Go and R, built on the Verdifax SDK in
 2. **Fifteen rule steps**, one per rule, each a branch after intake. The model is sent the draft and one rule and answers in a fixed form, `{verdict, reason}`. Each step seals the rule, the answer, the model that answered (as the API's response named it), the prompt's hash and the model's exact answer, which Verdifax's own AI review also reads.
 3. **Verdict.** A final step joins all fifteen branches: pass only when every rule passed. No model call; the verdict is computed from the answers. A missing, extra or reordered step breaks the job.
 4. **Sign-off.** A person holding the approver key signs approve or reject on the verdict, or rejects a refusal's receipt.
-5. **Feed.** The refusals, the sign-offs and the key changes appear in the account's signal feed, as a GRC system would receive them.
+5. **Publish.** The account's owner key makes the job's records public on random links, or withdraws them. Each decision is sealed by Verdifax as a run publication with its place in the feed, so an auditor sees who made what public and when.
+6. **Feed.** The refusals, the sign-offs, the publications and the key changes appear in the account's signal feed, as a GRC system would receive them.
 
-Every record and its place in the job is anchored on the public log, and `verdifax-verify` checks it all offline; the verifier reads these records since v0.23.0, and an earlier release refuses them.
+Every record and its place in the job is anchored on the public log, and `verdifax-verify` checks it all offline; the verifier reads these records since v0.23.0 and this feed since v0.24.0, and a release before either refuses what it does not know.
 
 ## Run it on your own drafts
 
@@ -57,7 +58,7 @@ Rscript /path/to/verdifax-claims-review-demo/r/claims-review.R setup
 Rscript /path/to/verdifax-claims-review-demo/r/claims-review.R review draft.md
 ```
 
-The commands are the same in every language, and so are the files: a folder set up by one program is used by any other, so `setup` runs once per account however many of the programs you use.
+The commands are the same in every language (setup, review, sign-off, publish, unpublish, feed, verify-commands), and so are the files: a folder set up by one program is used by any other, so `setup` runs once per account however many of the programs you use.
 
 The commands are the same in every language:
 
@@ -67,6 +68,8 @@ The commands are the same in every language:
 | `review DRAFT.md [--model ID]` | Runs one job on the draft and writes its sealed records to `records/<job_id>/steps/` (the folder `verdifax-verify --job` reads), with the exact payload bytes beside them, so a reader recomputes every sealed payload hash. Prints the verdict, the measured model use and the verify commands. A refused step, at intake or later, stops the job: its receipt, the records sealed before it and every payload go to `records/refused-<run_id>/`, and `job.json` there names the step. |
 | `sign-off JOB_ID approve\|reject [--note TEXT]` | Signs the decision on the job's verdict with the approver key. Only the note's hash is sent. |
 | `sign-off --receipt RUN_ID reject` | Signs a decision on a refusal's receipt. |
+| `publish JOB_ID` | Makes every record of the job public on a random link with the owner key, and writes `records/<job_id>/published.json` with each link and the sealed publication. `publish --receipt RUN_ID` does the same for a refusal's receipt. |
+| `unpublish JOB_ID` | Withdraws the job's records from their links; a later `publish` restores the same links. `--receipt RUN_ID` for a receipt. |
 | `feed` | Reads the account's whole signal feed with the feed key into `signals.json`. |
 | `verify-commands JOB_ID` | Prints the `verdifax-verify` commands for the job, the policy, the sign-offs and the feed. |
 
@@ -74,7 +77,7 @@ The commands are the same in every language:
 
 ## Check the results offline
 
-Install `verdifax-verify` from github.com/Verdifax/verdifax-verify (the verifier reads these records since v0.23.0), then:
+Install `verdifax-verify` from github.com/Verdifax/verdifax-verify (the verifier reads these records and this feed since v0.24.0), then:
 
 ```bash
 verdifax-verify --job records/<job_id>/steps

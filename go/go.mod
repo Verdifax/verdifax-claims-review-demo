@@ -3,7 +3,7 @@ module github.com/Verdifax/verdifax-claims-review-demo/go
 go 1.27.1
 
 require (
-	github.com/Verdifax/verdifax-sdk-go v1.5.1
+	github.com/Verdifax/verdifax-sdk-go v1.6.0
 	github.com/anthropics/anthropic-sdk-go/v2 v2.7.0
 )
 

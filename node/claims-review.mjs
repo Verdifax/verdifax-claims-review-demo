@@ -40,7 +40,7 @@ const ROUTE_RULE = "claims-review/v1/rule-check";
 const ROUTE_VERDICT = "claims-review/v1/verdict";
 const OBJECT_PREFIX = "claims-review/v1/";
 const LEVELS = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI"];
-const MIN_VERIFIER = "v0.23.0";
+const MIN_VERIFIER = "v0.24.0";
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const sha256Hex = (data) => createHash("sha256").update(data).digest("hex");
@@ -385,6 +385,45 @@ async function cmdSignOff(jobId, decision, note, receiptRunId) {
 
 // ── feed ───────────────────────────────────────────────────────────────────
 
+// ── publish ────────────────────────────────────────────────────────────────
+// The account's owner key makes a record public on its random link, or
+// withdraws it. Each decision is sealed by the server as a run publication
+// and placed in the account's feed, which `feed` then reads.
+
+// The folder and the records a publish or unpublish acts on: every step of
+// a job, or one refusal's receipt.
+function publicationTargets(jobId, receipt) {
+  if (receipt) {
+    const runId = Number(receipt);
+    const folder = (existsSync("records") ? readdirSync("records").filter((p) => p.startsWith("refused-")).map((p) => join("records", p)) : [])
+      .find((p) => existsSync(join(p, "job.json")) && JSON.parse(readFileSync(join(p, "job.json"), "utf8")).refused_run_id === runId)
+      || join("records", `receipt-${runId}`);
+    return { folder, targets: { receipt: runId } };
+  }
+  const folder = join("records", jobId);
+  const summary = JSON.parse(readFileSync(join(folder, "job.json"), "utf8"));
+  return { folder, targets: { ...summary.run_ids } };
+}
+
+async function publication(jobId, receipt, publish) {
+  const keys = loadKeys();
+  const owner = clientFor(keys.owner);
+  const { folder, targets } = publicationTargets(jobId, receipt);
+  const published = {};
+  for (const name of Object.keys(targets).sort()) {
+    const runId = targets[name];
+    const answer = publish ? await owner.publishRun(runId) : await owner.unpublishRun(runId);
+    published[name] = { run_id: runId, public: answer.public, public_bundle_url: answer.public_bundle_url ?? null, verify_url: answer.verify_url, publication: answer.publication };
+  }
+  writeJSON(join(folder, "published.json"), published);
+  console.log(`${publish ? "published" : "withdrawn"} ${Object.keys(published).length} record(s) in ${folder}`);
+  if (publish) {
+    const shown = published.verdict || published.receipt || published[Object.keys(published).sort()[0]];
+    console.log(`public link: ${shown.verify_url}`);
+  }
+  console.log("each decision is an event in the account's feed; after `feed`, verify: verdifax-verify --signals signals.json");
+}
+
 async function cmdFeed() {
   const keys = loadKeys();
   const feed = new VerdifaxClient({ baseURL: baseURL(), apiKey: keys.feed.secret });
@@ -448,13 +487,20 @@ async function main() {
       if (!receipt && !jobId) fail("sign-off needs a JOB_ID, or --receipt RUN_ID");
       return cmdSignOff(jobId, decision, note, receipt);
     }
+    case "publish":
+    case "unpublish": {
+      const receipt = option(args, "--receipt");
+      const jobId = args.shift();
+      if (!receipt && !jobId) fail(`${command} needs a JOB_ID, or --receipt RUN_ID`);
+      return publication(jobId, receipt, command === "publish");
+    }
     case "feed":
       return cmdFeed();
     case "verify-commands":
       if (args.length !== 1) fail("verify-commands takes a JOB_ID");
       return printVerifyCommands(args[0]);
     default:
-      fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, feed, verify-commands JOB_ID");
+      fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, feed, verify-commands JOB_ID");
   }
 }
 

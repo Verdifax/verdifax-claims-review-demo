@@ -52,7 +52,7 @@ ROUTE_VERDICT = "claims-review/v1/verdict"
 OBJECT_PREFIX = "claims-review/v1/"
 LEVELS = ("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
 VERDICTS = ("pass", "fail", "unanswered")
-MIN_VERIFIER = "v0.23.0"
+MIN_VERIFIER = "v0.24.0"
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 
@@ -381,6 +381,50 @@ def cmd_sign_off(args: argparse.Namespace) -> None:
 
 # ── feed ───────────────────────────────────────────────────────────────────
 
+# ── publish ────────────────────────────────────────────────────────────────
+# The account's owner key makes a record public on its random link, or
+# withdraws it. Each decision is sealed by the server as a run publication
+# and placed in the account's feed, which `feed` then reads.
+
+def publication_targets(job_id: Optional[str], receipt: Optional[str]) -> tuple[Path, dict[str, int]]:
+    """The folder and the records a publish or unpublish acts on: every step
+    of a job, or one refusal's receipt."""
+    if receipt:
+        run_id = int(receipt)
+        folder = next((p for p in Path("records").glob("refused-*") if (p / "job.json").exists()
+                       and json.loads((p / "job.json").read_text())["refused_run_id"] == run_id), Path("records") / ("receipt-%d" % run_id))
+        return folder, {"receipt": run_id}
+    folder = Path("records") / str(job_id)
+    summary = json.loads((folder / "job.json").read_text(encoding="utf-8"))
+    return folder, dict(summary["run_ids"])
+
+
+def publication(args: argparse.Namespace, publish: bool) -> None:
+    keys = load_keys()
+    owner = client_for(keys["owner"])
+    folder, targets = publication_targets(args.job_id, args.receipt)
+    published: dict[str, Any] = {}
+    for name in sorted(targets):
+        run_id = targets[name]
+        answer = owner.publish_run(run_id) if publish else owner.unpublish_run(run_id)
+        published[name] = {"run_id": run_id, "public": answer["public"], "public_bundle_url": answer.get("public_bundle_url"),
+                           "verify_url": answer["verify_url"], "publication": answer["publication"]}
+    write_json(folder / "published.json", published)
+    print("%s %d record(s) in %s" % ("published" if publish else "withdrawn", len(published), folder))
+    if publish:
+        shown = published.get("verdict") or published.get("receipt") or published[sorted(published)[0]]
+        print("public link: %s" % shown["verify_url"])
+    print("each decision is an event in the account's feed; after `feed`, verify: verdifax-verify --signals signals.json")
+
+
+def cmd_publish(args: argparse.Namespace) -> None:
+    publication(args, True)
+
+
+def cmd_unpublish(args: argparse.Namespace) -> None:
+    publication(args, False)
+
+
 def cmd_feed(_: argparse.Namespace) -> None:
     keys = load_keys()
     feed = verdifax.VerdifaxClient(base_url=base_url(), api_key=keys["feed"]["secret"])
@@ -432,13 +476,18 @@ def main(argv: Optional[list[str]] = None) -> None:
     sign.add_argument("--note")
     sign.add_argument("--receipt", help="sign off a refusal's receipt by run id")
     sign.set_defaults(fn=cmd_sign_off)
+    for name, fn in (("publish", cmd_publish), ("unpublish", cmd_unpublish)):
+        pub = sub.add_parser(name)
+        pub.add_argument("job_id", nargs="?")
+        pub.add_argument("--receipt", help="act on a refusal's receipt by run id")
+        pub.set_defaults(fn=fn)
     sub.add_parser("feed").set_defaults(fn=cmd_feed)
     verify = sub.add_parser("verify-commands")
     verify.add_argument("job_id")
     verify.set_defaults(fn=cmd_verify_commands)
     args = parser.parse_args(argv)
-    if args.command == "sign-off" and not args.receipt and not args.job_id:
-        parser.error("sign-off needs a JOB_ID, or --receipt RUN_ID")
+    if args.command in ("sign-off", "publish", "unpublish") and not args.receipt and not args.job_id:
+        parser.error("%s needs a JOB_ID, or --receipt RUN_ID" % args.command)
     args.fn(args)
 
 

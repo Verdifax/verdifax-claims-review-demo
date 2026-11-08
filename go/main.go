@@ -54,7 +54,7 @@ const (
 	routeRule      = "claims-review/v1/rule-check"
 	routeVerdict   = "claims-review/v1/verdict"
 	objectPrefix   = "claims-review/v1/"
-	minVerifier    = "v0.23.0"
+	minVerifier    = "v0.24.0"
 )
 
 var levels = map[string]bool{"PUBLIC": true, "INTERNAL": true, "CONFIDENTIAL": true, "RESTRICTED": true, "TOP_SECRET": true, "TS_SCI": true}
@@ -616,6 +616,80 @@ func cmdSignOff(ctx context.Context, jobID, decision, note, receiptRunID string)
 
 // ── feed ───────────────────────────────────────────────────────────────────
 
+// ── publish ────────────────────────────────────────────────────────────────
+// The account's owner key makes a record public on its random link, or
+// withdraws it. Each decision is sealed by the server as a run publication
+// and placed in the account's feed, which feed then reads.
+
+// publicationTargets is the folder and the records a publish or unpublish
+// acts on: every step of a job, or one refusal's receipt.
+func publicationTargets(jobID, receipt string) (string, map[string]int64) {
+	if receipt != "" {
+		runID, parseErr := strconv.ParseInt(receipt, 10, 64)
+		must(parseErr)
+		folder := filepath.Join("records", fmt.Sprintf("receipt-%d", runID))
+		matches, _ := filepath.Glob(filepath.Join("records", "refused-*", "job.json"))
+		for _, m := range matches {
+			var summary struct {
+				RefusedRunID int64 `json:"refused_run_id"`
+			}
+			if json.Unmarshal(readFile(m), &summary) == nil && summary.RefusedRunID == runID {
+				folder = filepath.Dir(m)
+			}
+		}
+		return folder, map[string]int64{"receipt": runID}
+	}
+	folder := filepath.Join("records", jobID)
+	var summary struct {
+		RunIDs map[string]int64 `json:"run_ids"`
+	}
+	must(json.Unmarshal(readFile(filepath.Join(folder, "job.json")), &summary))
+	return folder, summary.RunIDs
+}
+
+func cmdPublication(ctx context.Context, jobID, receipt string, publish bool) {
+	keys := loadKeys()
+	owner := clientFor(keys.Owner.Secret, keys.Owner.SigningKey)
+	folder, targets := publicationTargets(jobID, receipt)
+	names := make([]string, 0, len(targets))
+	for name := range targets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	published := map[string]any{}
+	var shown *verdifax.PublicationResult
+	for _, name := range names {
+		runID := targets[name]
+		var answer *verdifax.PublicationResult
+		var callErr error
+		if publish {
+			answer, callErr = owner.PublishRun(ctx, runID)
+		} else {
+			answer, callErr = owner.UnpublishRun(ctx, runID)
+		}
+		must(callErr)
+		var link any
+		if answer.PublicBundleURL != "" {
+			link = answer.PublicBundleURL
+		}
+		published[name] = map[string]any{"run_id": runID, "public": answer.Public, "public_bundle_url": link,
+			"verify_url": answer.VerifyURL, "publication": answer.Publication}
+		if name == "verdict" || name == "receipt" || shown == nil {
+			shown = answer
+		}
+	}
+	writeJSON(filepath.Join(folder, "published.json"), published)
+	verb := "withdrawn"
+	if publish {
+		verb = "published"
+	}
+	fmt.Printf("%s %d record(s) in %s\n", verb, len(published), folder)
+	if publish && shown != nil {
+		fmt.Printf("public link: %s\n", shown.VerifyURL)
+	}
+	fmt.Println("each decision is an event in the account's feed; after feed, verify: verdifax-verify --signals signals.json")
+}
+
 func cmdFeed(ctx context.Context) {
 	keys := loadKeys()
 	feed, newErr := verdifax.NewClient(verdifax.Config{BaseURL: baseURL(), APIKey: keys.Feed.Secret})
@@ -683,7 +757,7 @@ func takeOption(args []string, name string) (string, []string) {
 
 func main() {
 	ctx := context.Background()
-	usage := "commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, feed, verify-commands JOB_ID"
+	usage := "commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, feed, verify-commands JOB_ID"
 	if len(os.Args) < 2 {
 		fail(usage)
 	}
@@ -719,6 +793,16 @@ func main() {
 			fail("sign-off needs a JOB_ID, or --receipt RUN_ID")
 		}
 		cmdSignOff(ctx, jobID, decision, note, receipt)
+	case "publish", "unpublish":
+		receipt, rest := takeOption(args, "--receipt")
+		jobID := ""
+		if len(rest) > 0 {
+			jobID = rest[0]
+		}
+		if receipt == "" && jobID == "" {
+			fail(command + " needs a JOB_ID, or --receipt RUN_ID")
+		}
+		cmdPublication(ctx, jobID, receipt, command == "publish")
 	case "feed":
 		cmdFeed(ctx)
 	case "verify-commands":

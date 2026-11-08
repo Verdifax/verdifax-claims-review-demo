@@ -42,6 +42,26 @@
         "<folder>/signoff-history.json"
       ]
     },
+    "publish": {
+      "flags": [
+        "--receipt"
+      ],
+      "env": [],
+      "writes": [
+        "records/<job_id>/published.json",
+        "records/refused-<run_id>/published.json"
+      ]
+    },
+    "unpublish": {
+      "flags": [
+        "--receipt"
+      ],
+      "env": [],
+      "writes": [
+        "records/<job_id>/published.json",
+        "records/refused-<run_id>/published.json"
+      ]
+    },
     "feed": {
       "flags": [],
       "env": [],
@@ -64,7 +84,7 @@
     "route_rule": "claims-review/v1/rule-check",
     "route_verdict": "claims-review/v1/verdict",
     "object_prefix": "claims-review/v1/",
-    "min_verifier": "v0.23.0",
+    "min_verifier": "v0.24.0",
     "program_id_source": "verdifax-claims-review-demo/program/v1",
     "registry_record_hash_source": "verdifax-claims-review-demo/registry/v1",
     "decision_kinds": [
@@ -170,5 +190,12 @@
     "draft_sha256",
     "reason",
     "run_ids"
+  ],
+  "published_fields": [
+    "run_id",
+    "public",
+    "public_bundle_url",
+    "verify_url",
+    "publication"
   ]
 }

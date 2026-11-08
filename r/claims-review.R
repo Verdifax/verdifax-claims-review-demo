@@ -39,7 +39,7 @@ ROUTE_RULE <- "claims-review/v1/rule-check"
 ROUTE_VERDICT <- "claims-review/v1/verdict"
 OBJECT_PREFIX <- "claims-review/v1/"
 LEVELS <- c("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
-MIN_VERIFIER <- "v0.23.0"
+MIN_VERIFIER <- "v0.24.0"
 
 script_dir <- function() {
   args <- commandArgs(trailingOnly = FALSE)
@@ -398,6 +398,47 @@ cmd_sign_off <- function(job_id, decision, note, receipt_run_id) {
 
 # ── feed ───────────────────────────────────────────────────────────────────
 
+# ── publish ────────────────────────────────────────────────────────────────
+# The account's owner key makes a record public on its random link, or
+# withdraws it. Each decision is sealed by the server as a run publication
+# and placed in the account's feed, which `feed` then reads.
+
+# The folder and the records a publish or unpublish acts on: every step of a
+# job, or one refusal's receipt.
+publication_targets <- function(job_id, receipt) {
+  if (!is.null(receipt)) {
+    run_id <- as.integer(receipt)
+    folders <- Filter(function(p) file.exists(file.path(p, "job.json")) &&
+                        identical(as.integer(jsonlite::fromJSON(file.path(p, "job.json"))$refused_run_id), run_id),
+                      list.files("records", pattern = "^refused-", full.names = TRUE))
+    folder <- if (length(folders) > 0) folders[1] else file.path("records", paste0("receipt-", run_id))
+    return(list(folder = folder, targets = list(receipt = run_id)))
+  }
+  folder <- file.path("records", job_id)
+  summary <- jsonlite::fromJSON(file.path(folder, "job.json"), simplifyVector = FALSE)
+  list(folder = folder, targets = summary$run_ids)
+}
+
+cmd_publication <- function(job_id, receipt, publish) {
+  keys <- load_keys()
+  owner <- client_for(keys$owner)
+  where <- publication_targets(job_id, receipt)
+  published <- list()
+  for (name in sort(names(where$targets))) {
+    run_id <- as.integer(where$targets[[name]])
+    answer <- if (publish) verdifax_publish_run(owner, run_id) else verdifax_unpublish_run(owner, run_id)
+    published[[name]] <- list(run_id = run_id, public = answer$public, public_bundle_url = answer$public_bundle_url,
+                              verify_url = answer$verify_url, publication = answer$publication)
+  }
+  write_json(file.path(where$folder, "published.json"), published)
+  cat(sprintf("%s %d record(s) in %s\n", if (publish) "published" else "withdrawn", length(published), where$folder))
+  if (publish) {
+    shown <- if (!is.null(published$verdict)) published$verdict else if (!is.null(published$receipt)) published$receipt else published[[sort(names(published))[1]]]
+    cat(sprintf("public link: %s\n", shown$verify_url))
+  }
+  cat("each decision is an event in the account's feed; after `feed`, verify: verdifax-verify --signals signals.json\n")
+}
+
 cmd_feed <- function() {
   keys <- load_keys()
   feed <- verdifax_client(base_url = base_url(), api_key = keys$feed$secret)
@@ -439,7 +480,7 @@ take_option <- function(args, name) {
 
 main <- function() {
   args <- commandArgs(trailingOnly = TRUE)
-  if (length(args) == 0) fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, feed, verify-commands JOB_ID")
+  if (length(args) == 0) fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, feed, verify-commands JOB_ID")
   command <- args[1]
   args <- args[-1]
   if (command == "setup") return(cmd_setup())
@@ -459,12 +500,18 @@ main <- function() {
     if (is.null(receipt$value) && is.null(job_id)) fail("sign-off needs a JOB_ID, or --receipt RUN_ID")
     return(cmd_sign_off(job_id, decision, note$value, receipt$value))
   }
+  if (command %in% c("publish", "unpublish")) {
+    receipt <- take_option(args, "--receipt"); args <- receipt$args
+    job_id <- if (length(args) > 0) args[1] else NULL
+    if (is.null(receipt$value) && is.null(job_id)) fail(paste(command, "needs a JOB_ID, or --receipt RUN_ID"))
+    return(cmd_publication(job_id, receipt$value, command == "publish"))
+  }
   if (command == "feed") return(cmd_feed())
   if (command == "verify-commands") {
     if (length(args) != 1) fail("verify-commands takes a JOB_ID")
     return(print_verify_commands(args[1]))
   }
-  fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, feed, verify-commands JOB_ID")
+  fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, feed, verify-commands JOB_ID")
 }
 
 if (!nzchar(Sys.getenv("CLAIMS_REVIEW_NO_MAIN"))) main()

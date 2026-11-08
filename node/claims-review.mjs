@@ -315,7 +315,8 @@ async function refuse(agent, jobId, step, runIds, payloads, draftPath, draftHash
   const refused = await newestRefusal(agent);
   const folder = join("records", `refused-${refused}`); // named by the run, so two refusals never share a folder
   writeJSON(join(folder, "receipt.json"), await agent.getDenyReceipt(refused));
-  for (const [sealedStep, runId] of Object.entries(runIds)) writeFileSync(join(folder, `${sealedStep}.json`), await agent.getRunArtifacts(runId));
+  mkdirSync(join(folder, "steps"), { recursive: true });
+  for (const [sealedStep, runId] of Object.entries(runIds)) writeFileSync(join(folder, "steps", `${sealedStep}.json`), await agent.getRunArtifacts(runId));
   mkdirSync(join(folder, "payloads"), { recursive: true });
   for (const [name, payload] of Object.entries(payloads)) writeFileSync(join(folder, "payloads", `${name}.json`), canonical(payload));
   writeJSON(join(folder, "job.json"), { refused_run_id: refused, step, job_id: jobId, draft: draftPath, draft_sha256: draftHash, reason, run_ids: runIds });
@@ -328,10 +329,14 @@ async function saveJobRecords(agent, jobId, out, runIds, payloads) {
   if (rows.length !== Object.keys(runIds).length) {
     fail(`the export lists ${rows.length} records for ${jobId}, the program sealed ${Object.keys(runIds).length}`);
   }
+  // The sealed step records alone sit in steps/, the folder verdifax-verify
+  // --job reads: it takes every .json file there as a record, so the
+  // summary, the sign-offs and the payloads live beside that folder.
+  mkdirSync(join(out, "steps"), { recursive: true });
   mkdirSync(join(out, "payloads"), { recursive: true });
   for (const row of rows) {
-    if (row.status === "pepg_deny") writeJSON(join(out, `${row.step_id}.json`), await agent.getDenyReceipt(row.run_id));
-    else writeFileSync(join(out, `${row.step_id}.json`), await agent.getRunArtifacts(row.run_id));
+    if (row.status === "pepg_deny") writeJSON(join(out, "steps", `${row.step_id}.json`), await agent.getDenyReceipt(row.run_id));
+    else writeFileSync(join(out, "steps", `${row.step_id}.json`), await agent.getRunArtifacts(row.run_id));
   }
   // The exact bytes each step sent, so a reader recomputes the sealed
   // payload hash from the file.
@@ -366,14 +371,14 @@ async function cmdSignOff(jobId, decision, note, receiptRunId) {
     folder = join("records", jobId);
     const summary = JSON.parse(readFileSync(join(folder, "job.json"), "utf8"));
     runId = summary.final_run_id;
-    const artifacts = JSON.parse(readFileSync(join(folder, "verdict.json"), "utf8"));
+    const artifacts = JSON.parse(readFileSync(join(folder, "steps", "verdict.json"), "utf8"));
     target = { kind: "job", run_id: runId, digest: artifacts.bundle_anchor.anchored_digest, job_id: jobId };
   }
   const record = await agent.signOff(target, decision, key, note ? { note } : {});
   writeJSON(join(folder, "signoffs.json"), await agent.getSignOffs(runId));
   writeJSON(join(folder, "signoff-history.json"), await owner.getSignOffHistory());
   console.log(`sign-off ${decision} recorded as sequence ${record.sequence}, hash ${record.signoff_hash}`);
-  const recordFile = join(folder, receiptRunId ? "receipt.json" : "verdict.json");
+  const recordFile = receiptRunId ? join(folder, "receipt.json") : join(folder, "steps", "verdict.json");
   console.log(`verify: verdifax-verify --signoff ${join(folder, "signoffs.json")} --approver-key approver.txt ${recordFile}`);
   console.log(`verify: verdifax-verify --signoff-history ${join(folder, "signoff-history.json")}`);
 }
@@ -403,10 +408,10 @@ async function cmdFeed() {
 function printVerifyCommands(jobId) {
   const folder = join("records", jobId);
   console.log(`verify with verdifax-verify ${MIN_VERIFIER} or later:`);
-  console.log(`  verdifax-verify --job ${folder}`);
-  console.log(`  verdifax-verify --account-policy ${join(REPO, "policy", "claims-review-v1.json")} ${join(folder, "verdict.json")}`);
+  console.log(`  verdifax-verify --job ${join(folder, "steps")}`);
+  console.log(`  verdifax-verify --account-policy ${join(REPO, "policy", "claims-review-v1.json")} ${join(folder, "steps", "verdict.json")}`);
   if (existsSync(join(folder, "signoffs.json"))) {
-    console.log(`  verdifax-verify --signoff ${join(folder, "signoffs.json")} --approver-key approver.txt ${join(folder, "verdict.json")}`);
+    console.log(`  verdifax-verify --signoff ${join(folder, "signoffs.json")} --approver-key approver.txt ${join(folder, "steps", "verdict.json")}`);
   }
   if (existsSync("signals.json")) console.log("  verdifax-verify --signals signals.json");
 }

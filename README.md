@@ -64,7 +64,7 @@ The commands are the same in every language:
 | Command | Does |
 |---|---|
 | `setup` | Registers the owner's request key, creates the agent's key and a feed key, registers an approver key generated on this machine, and activates the account policy in [policy/claims-review-v1.json](policy/claims-review-v1.json). Runs once per account and folder. |
-| `review DRAFT.md [--model ID]` | Runs one job on the draft and writes its records to `records/<job_id>/`, with the exact payload bytes beside them, so a reader recomputes every sealed payload hash. Prints the verdict, the measured model use and the verify commands. A refused step, at intake or later, stops the job: its receipt, the records sealed before it and every payload go to `records/refused-<run_id>/`, and `job.json` there names the step. |
+| `review DRAFT.md [--model ID]` | Runs one job on the draft and writes its sealed records to `records/<job_id>/steps/` (the folder `verdifax-verify --job` reads), with the exact payload bytes beside them, so a reader recomputes every sealed payload hash. Prints the verdict, the measured model use and the verify commands. A refused step, at intake or later, stops the job: its receipt, the records sealed before it and every payload go to `records/refused-<run_id>/`, and `job.json` there names the step. |
 | `sign-off JOB_ID approve\|reject [--note TEXT]` | Signs the decision on the job's verdict with the approver key. Only the note's hash is sent. |
 | `sign-off --receipt RUN_ID reject` | Signs a decision on a refusal's receipt. |
 | `feed` | Reads the account's whole signal feed with the feed key into `signals.json`. |
@@ -77,9 +77,9 @@ The commands are the same in every language:
 Install `verdifax-verify` from github.com/Verdifax/verdifax-verify (the verifier reads these records since v0.23.0), then:
 
 ```bash
-verdifax-verify --job records/<job_id>
-verdifax-verify --account-policy policy/claims-review-v1.json records/<job_id>/verdict.json
-verdifax-verify --signoff records/<job_id>/signoffs.json --approver-key approver.txt records/<job_id>/verdict.json
+verdifax-verify --job records/<job_id>/steps
+verdifax-verify --account-policy policy/claims-review-v1.json records/<job_id>/steps/verdict.json
+verdifax-verify --signoff records/<job_id>/signoffs.json --approver-key approver.txt records/<job_id>/steps/verdict.json
 verdifax-verify --signoff-history records/<job_id>/signoff-history.json
 verdifax-verify --signals signals.json
 ```

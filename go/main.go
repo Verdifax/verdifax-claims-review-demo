@@ -504,7 +504,7 @@ func refuse(ctx context.Context, agent *verdifax.Client, jobID, step string, run
 	for sealedStep, runID := range runIDs {
 		artifacts, artifactsErr := agent.GetRunArtifacts(ctx, runID)
 		must(artifactsErr)
-		writeText(filepath.Join(folder, sealedStep+".json"), string(artifacts))
+		writeText(filepath.Join(folder, "steps", sealedStep+".json"), string(artifacts))
 	}
 	for name, payload := range payloads {
 		writeText(filepath.Join(folder, "payloads", name+".json"), canonical(payload))
@@ -521,17 +521,20 @@ func saveJobRecords(ctx context.Context, agent *verdifax.Client, jobID, out stri
 	if len(export.Runs) != len(runIDs) {
 		fail(fmt.Sprintf("the export lists %d records for %s, the program sealed %d", len(export.Runs), jobID, len(runIDs)))
 	}
+	// The sealed step records alone sit in steps/, the folder verdifax-verify
+	// --job reads: it takes every .json file there as a record, so the
+	// summary, the sign-offs and the payloads live beside that folder.
 	must(os.MkdirAll(filepath.Join(out, "payloads"), 0o755))
 	for _, row := range export.Runs {
 		if row.Status == "pepg_deny" {
 			receipt, receiptErr := agent.GetDenyReceipt(ctx, row.RunID)
 			must(receiptErr)
-			writeJSON(filepath.Join(out, row.StepID+".json"), receipt)
+			writeJSON(filepath.Join(out, "steps", row.StepID+".json"), receipt)
 			continue
 		}
 		artifacts, artifactsErr := agent.GetRunArtifacts(ctx, row.RunID)
 		must(artifactsErr)
-		writeText(filepath.Join(out, row.StepID+".json"), string(artifacts))
+		writeText(filepath.Join(out, "steps", row.StepID+".json"), string(artifacts))
 	}
 	// The exact bytes each step sent, so a reader recomputes the sealed
 	// payload hash from the file.
@@ -594,9 +597,9 @@ func cmdSignOff(ctx context.Context, jobID, decision, note, receiptRunID string)
 				AnchoredDigest string `json:"anchored_digest"`
 			} `json:"bundle_anchor"`
 		}
-		must(json.Unmarshal(readFile(filepath.Join(folder, "verdict.json")), &artifacts))
+		must(json.Unmarshal(readFile(filepath.Join(folder, "steps", "verdict.json")), &artifacts))
 		target = verdifax.SignOffTarget{Kind: verdifax.SignOffTargetJob, RunID: runID, Digest: artifacts.BundleAnchor.AnchoredDigest, JobID: jobID}
-		recordFile = "verdict.json"
+		recordFile = filepath.Join("steps", "verdict.json")
 	}
 	record, signErr := agent.SignOff(ctx, target, decision, key, &verdifax.SignOffOptions{Note: note})
 	must(signErr)
@@ -654,10 +657,10 @@ func cmdFeed(ctx context.Context) {
 func printVerifyCommands(jobID string) {
 	folder := filepath.Join("records", jobID)
 	fmt.Printf("verify with verdifax-verify %s or later:\n", minVerifier)
-	fmt.Printf("  verdifax-verify --job %s\n", folder)
-	fmt.Printf("  verdifax-verify --account-policy %s %s\n", filepath.Join(repo, "policy", "claims-review-v1.json"), filepath.Join(folder, "verdict.json"))
+	fmt.Printf("  verdifax-verify --job %s\n", filepath.Join(folder, "steps"))
+	fmt.Printf("  verdifax-verify --account-policy %s %s\n", filepath.Join(repo, "policy", "claims-review-v1.json"), filepath.Join(folder, "steps", "verdict.json"))
 	if _, statErr := os.Stat(filepath.Join(folder, "signoffs.json")); statErr == nil {
-		fmt.Printf("  verdifax-verify --signoff %s --approver-key approver.txt %s\n", filepath.Join(folder, "signoffs.json"), filepath.Join(folder, "verdict.json"))
+		fmt.Printf("  verdifax-verify --signoff %s --approver-key approver.txt %s\n", filepath.Join(folder, "signoffs.json"), filepath.Join(folder, "steps", "verdict.json"))
 	}
 	if _, statErr := os.Stat("signals.json"); statErr == nil {
 		fmt.Println("  verdifax-verify --signals signals.json")

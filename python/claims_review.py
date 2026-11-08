@@ -313,7 +313,8 @@ def refuse(agent: verdifax.VerdifaxClient, job_id: str, step: str, run_ids: dict
     folder = Path("records") / ("refused-%d" % refused)  # named by the run, so two refusals never share a folder
     write_json(folder / "receipt.json", agent.get_deny_receipt(refused))
     for sealed_step, run_id in run_ids.items():
-        (folder / ("%s.json" % sealed_step)).write_text(agent.get_run_artifacts(run_id), encoding="utf-8")
+        (folder / "steps").mkdir(parents=True, exist_ok=True)
+        (folder / "steps" / ("%s.json" % sealed_step)).write_text(agent.get_run_artifacts(run_id), encoding="utf-8")
     (folder / "payloads").mkdir(parents=True, exist_ok=True)
     for name, payload in payloads.items():
         (folder / "payloads" / ("%s.json" % name)).write_text(canonical(payload), encoding="utf-8")
@@ -327,12 +328,15 @@ def save_job_records(agent: verdifax.VerdifaxClient, job_id: str, out: Path, run
     rows = agent.export_runs(job_id=job_id).runs
     if len(rows) != len(run_ids):
         fail("the export lists %d records for %s, the program sealed %d" % (len(rows), job_id, len(run_ids)))
-    out.mkdir(parents=True, exist_ok=True)
+    # The sealed step records alone sit in steps/, the folder verdifax-verify
+    # --job reads: it takes every .json file there as a record, so the
+    # summary, the sign-offs and the payloads live beside that folder.
+    (out / "steps").mkdir(parents=True, exist_ok=True)
     for row in rows:
         if row.status == "pepg_deny":
-            write_json(out / ("%s.json" % row.step_id), agent.get_deny_receipt(row.run_id))
+            write_json(out / "steps" / ("%s.json" % row.step_id), agent.get_deny_receipt(row.run_id))
         else:
-            (out / ("%s.json" % row.step_id)).write_text(agent.get_run_artifacts(row.run_id), encoding="utf-8")
+            (out / "steps" / ("%s.json" % row.step_id)).write_text(agent.get_run_artifacts(row.run_id), encoding="utf-8")
     # The exact bytes each step sent, so a reader recomputes the sealed
     # payload hash from the file.
     (out / "payloads").mkdir(parents=True, exist_ok=True)
@@ -364,14 +368,14 @@ def cmd_sign_off(args: argparse.Namespace) -> None:
         folder = Path("records") / args.job_id
         summary = json.loads((folder / "job.json").read_text(encoding="utf-8"))
         run_id = summary["final_run_id"]
-        artifacts = json.loads((folder / "verdict.json").read_text(encoding="utf-8"))
+        artifacts = json.loads((folder / "steps" / "verdict.json").read_text(encoding="utf-8"))
         target = {"kind": "job", "run_id": run_id, "digest": artifacts["bundle_anchor"]["anchored_digest"], "job_id": args.job_id}
     record = agent.sign_off(target, args.decision, key, note=args.note)
     write_json(folder / "signoffs.json", agent.get_signoffs(run_id))
     write_json(folder / "signoff-history.json", owner.get_signoff_history())
     print("sign-off %s recorded as sequence %s, hash %s" % (args.decision, record["sequence"], record["signoff_hash"]))
     print("verify: verdifax-verify --signoff %s --approver-key approver.txt %s" % (folder / "signoffs.json",
-          folder / ("verdict.json" if not args.receipt else "receipt.json")))
+          folder / "receipt.json" if args.receipt else folder / "steps" / "verdict.json"))
     print("verify: verdifax-verify --signoff-history %s" % (folder / "signoff-history.json"))
 
 
@@ -401,10 +405,10 @@ def cmd_feed(_: argparse.Namespace) -> None:
 def print_verify_commands(job_id: str) -> None:
     folder = Path("records") / job_id
     print("verify with verdifax-verify %s or later:" % MIN_VERIFIER)
-    print("  verdifax-verify --job %s" % folder)
-    print("  verdifax-verify --account-policy %s %s" % (REPO / "policy" / "claims-review-v1.json", folder / "verdict.json"))
+    print("  verdifax-verify --job %s" % (folder / "steps"))
+    print("  verdifax-verify --account-policy %s %s" % (REPO / "policy" / "claims-review-v1.json", folder / "steps" / "verdict.json"))
     if (folder / "signoffs.json").exists():
-        print("  verdifax-verify --signoff %s --approver-key approver.txt %s" % (folder / "signoffs.json", folder / "verdict.json"))
+        print("  verdifax-verify --signoff %s --approver-key approver.txt %s" % (folder / "signoffs.json", folder / "steps" / "verdict.json"))
     if Path("signals.json").exists():
         print("  verdifax-verify --signals signals.json")
 

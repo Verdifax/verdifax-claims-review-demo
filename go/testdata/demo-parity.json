@@ -22,11 +22,11 @@
         "ANTHROPIC_API_KEY"
       ],
       "writes": [
-        "records/<job_id>/<step>.json",
+        "records/<job_id>/steps/<step>.json (the sealed records, the folder verdifax-verify --job reads)",
         "records/<job_id>/payloads/<step>.json",
         "records/<job_id>/job.json",
         "records/refused-<run_id>/receipt.json",
-        "records/refused-<run_id>/<step>.json (every step sealed before the refusal)",
+        "records/refused-<run_id>/steps/<step>.json (every step sealed before the refusal)",
         "records/refused-<run_id>/payloads/<step>.json (every step, the refused one included)",
         "records/refused-<run_id>/job.json"
       ]

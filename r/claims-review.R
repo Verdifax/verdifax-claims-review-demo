@@ -329,7 +329,7 @@ refuse <- function(agent, job_id, step, run_ids, payloads, draft_path, draft_has
   folder <- file.path("records", paste0("refused-", refused))  # named by the run, so two refusals never share a folder
   write_json(file.path(folder, "receipt.json"), verdifax_get_deny_receipt(agent, refused))
   for (sealed_step in names(run_ids)) {
-    write_text(file.path(folder, paste0(sealed_step, ".json")), verdifax_get_run_artifacts(agent, run_ids[[sealed_step]]))
+    write_text(file.path(folder, "steps", paste0(sealed_step, ".json")), verdifax_get_run_artifacts(agent, run_ids[[sealed_step]]))
   }
   for (name in names(payloads)) write_text(file.path(folder, "payloads", paste0(name, ".json")), canonical(payloads[[name]]))
   write_json(file.path(folder, "job.json"), list(refused_run_id = refused, step = step, job_id = job_id, draft = draft_path,
@@ -343,12 +343,15 @@ save_job_records <- function(agent, job_id, out, run_ids, payloads) {
   if (length(rows) != length(run_ids)) {
     fail(sprintf("the export lists %d records for %s, the program sealed %d", length(rows), job_id, length(run_ids)))
   }
+  # The sealed step records alone sit in steps/, the folder verdifax-verify
+  # --job reads: it takes every .json file there as a record, so the
+  # summary, the sign-offs and the payloads live beside that folder.
   dir.create(file.path(out, "payloads"), showWarnings = FALSE, recursive = TRUE)
   for (row in rows) {
     if (identical(row$status, "pepg_deny")) {
-      write_json(file.path(out, paste0(row$step_id, ".json")), verdifax_get_deny_receipt(agent, row$run_id))
+      write_json(file.path(out, "steps", paste0(row$step_id, ".json")), verdifax_get_deny_receipt(agent, row$run_id))
     } else {
-      write_text(file.path(out, paste0(row$step_id, ".json")), verdifax_get_run_artifacts(agent, row$run_id))
+      write_text(file.path(out, "steps", paste0(row$step_id, ".json")), verdifax_get_run_artifacts(agent, row$run_id))
     }
   }
   # The exact bytes each step sent, so a reader recomputes the sealed
@@ -381,9 +384,9 @@ cmd_sign_off <- function(job_id, decision, note, receipt_run_id) {
     folder <- file.path("records", job_id)
     summary <- jsonlite::fromJSON(file.path(folder, "job.json"), simplifyVector = FALSE)
     run_id <- as.integer(summary$final_run_id)
-    artifacts <- jsonlite::fromJSON(file.path(folder, "verdict.json"), simplifyVector = FALSE)
+    artifacts <- jsonlite::fromJSON(file.path(folder, "steps", "verdict.json"), simplifyVector = FALSE)
     target <- list(kind = "job", run_id = run_id, digest = artifacts$bundle_anchor$anchored_digest, job_id = job_id)
-    record_file <- "verdict.json"
+    record_file <- file.path("steps", "verdict.json")
   }
   record <- verdifax_sign_off(agent, target, decision, key, note = note)
   write_text(file.path(folder, "signoffs.json"), verdifax_get_signoffs(agent, run_id))
@@ -417,10 +420,10 @@ cmd_feed <- function() {
 print_verify_commands <- function(job_id) {
   folder <- file.path("records", job_id)
   cat(sprintf("verify with verdifax-verify %s or later:\n", MIN_VERIFIER))
-  cat(sprintf("  verdifax-verify --job %s\n", folder))
-  cat(sprintf("  verdifax-verify --account-policy %s %s\n", file.path(REPO, "policy", "claims-review-v1.json"), file.path(folder, "verdict.json")))
+  cat(sprintf("  verdifax-verify --job %s\n", file.path(folder, "steps")))
+  cat(sprintf("  verdifax-verify --account-policy %s %s\n", file.path(REPO, "policy", "claims-review-v1.json"), file.path(folder, "steps", "verdict.json")))
   if (file.exists(file.path(folder, "signoffs.json"))) {
-    cat(sprintf("  verdifax-verify --signoff %s --approver-key approver.txt %s\n", file.path(folder, "signoffs.json"), file.path(folder, "verdict.json")))
+    cat(sprintf("  verdifax-verify --signoff %s --approver-key approver.txt %s\n", file.path(folder, "signoffs.json"), file.path(folder, "steps", "verdict.json")))
   }
   if (file.exists("signals.json")) cat("  verdifax-verify --signals signals.json\n")
 }

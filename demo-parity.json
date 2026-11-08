@@ -1,0 +1,164 @@
+{
+  "note": "Every command, flag, file and sealed field of the claims review demo, held equal across python, node, go and r. scripts/check-public-claims.py (rule R131) fails when a program lacks one or a language's copy differs.",
+  "commands": {
+    "setup": {
+      "flags": [],
+      "env": [
+        "VERDIFAX_OWNER_KEY"
+      ],
+      "writes": [
+        "demo-keys.json",
+        "approver-key.json",
+        "approver.txt",
+        "account-history.json"
+      ]
+    },
+    "review": {
+      "flags": [
+        "--model",
+        "--answers"
+      ],
+      "env": [
+        "ANTHROPIC_API_KEY"
+      ],
+      "writes": [
+        "records/<job_id>/<step>.json",
+        "records/<job_id>/payloads/<step>.json",
+        "records/<job_id>/job.json",
+        "records/refused-<time>/receipt.json",
+        "records/refused-<time>/payloads/intake.json",
+        "records/refused-<time>/job.json"
+      ]
+    },
+    "sign-off": {
+      "flags": [
+        "--note",
+        "--receipt"
+      ],
+      "env": [],
+      "writes": [
+        "<folder>/signoffs.json",
+        "<folder>/signoff-history.json"
+      ]
+    },
+    "feed": {
+      "flags": [],
+      "env": [],
+      "writes": [
+        "signals.json"
+      ]
+    },
+    "verify-commands": {
+      "flags": [],
+      "env": [],
+      "writes": []
+    }
+  },
+  "constants": {
+    "default_model": "claude-fable-5-1",
+    "form": "verdifax.claims-review.v1",
+    "rule_set": "v1",
+    "actor_id": "claims-review-agent",
+    "route_intake": "claims-review/v1/intake",
+    "route_rule": "claims-review/v1/rule-check",
+    "route_verdict": "claims-review/v1/verdict",
+    "object_prefix": "claims-review/v1/",
+    "min_verifier": "v0.23.0",
+    "program_id_source": "verdifax-claims-review-demo/program/v1",
+    "registry_record_hash_source": "verdifax-claims-review-demo/registry/v1",
+    "decision_kinds": [
+      "claims.rule_check",
+      "claims.verdict"
+    ],
+    "verdicts": [
+      "pass",
+      "fail",
+      "unanswered"
+    ]
+  },
+  "steps": {
+    "intake": "intake",
+    "rules": [
+      "rule-01",
+      "rule-02",
+      "rule-03",
+      "rule-04",
+      "rule-05",
+      "rule-06",
+      "rule-07",
+      "rule-08",
+      "rule-09",
+      "rule-10",
+      "rule-11",
+      "rule-12",
+      "rule-13",
+      "rule-14",
+      "rule-15"
+    ],
+    "verdict": "verdict"
+  },
+  "payload_fields": {
+    "intake": [
+      "form",
+      "step",
+      "draft_sha256",
+      "draft_bytes",
+      "rule_set",
+      "rule_set_hash",
+      "classification"
+    ],
+    "rule": [
+      "form",
+      "step",
+      "rule_id",
+      "rule_text",
+      "draft_sha256",
+      "rule_set_hash",
+      "model",
+      "model_response_id",
+      "prompt_hash",
+      "verdict",
+      "reason"
+    ],
+    "verdict": [
+      "form",
+      "step",
+      "draft_sha256",
+      "rule_set_hash",
+      "verdict",
+      "failed_rules",
+      "results"
+    ]
+  },
+  "attested_context": {
+    "rule": [
+      "attested",
+      "actor_id",
+      "model_provider",
+      "model_name",
+      "prompt_hash",
+      "decision_kind",
+      "decision_result"
+    ],
+    "verdict": [
+      "attested",
+      "actor_id",
+      "decision_kind",
+      "decision_result"
+    ]
+  },
+  "job_summary_fields": [
+    "job_id",
+    "draft",
+    "draft_sha256",
+    "rule_set_hash",
+    "verdict",
+    "failed_rules",
+    "models",
+    "final_run_id",
+    "run_ids",
+    "measured_tokens",
+    "measured_cost_usd"
+  ],
+  "prompt_hash": "sha256 of the prompt file's bytes, a newline, and the user text 'Rule <id>: <text>\\n\\nDraft:\\n<draft>'"
+}

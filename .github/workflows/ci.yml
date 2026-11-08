@@ -1,0 +1,65 @@
+# Continuous integration for the claims review demo. Each language's program
+# is compiled or parsed and its unit tests run: canonical JSON, the rule set
+# hash, the classification line and the parity copy. The end-to-end check
+# against a Verdifax server runs in Verdifax's own interop and readiness
+# checks, which need an account.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: pip install -r python/requirements.txt
+      - run: python -m py_compile python/claims_review.py
+      - run: python -m unittest discover -s python -p "test_*.py" -v
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - run: npm ci
+        working-directory: node
+      - run: node --check claims-review.mjs
+        working-directory: node
+      - run: node --test
+        working-directory: node
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27"
+          cache-dependency-path: go/go.sum
+      - run: go vet ./...
+        working-directory: go
+      - run: go test -count=1 ./...
+        working-directory: go
+  r:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2.14.0
+        with:
+          r-version: "4.5"
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libsodium-dev libcurl4-openssl-dev libssl-dev
+      - run: Rscript -e 'install.packages(c("jsonlite", "openssl", "httr2"), repos = "https://cloud.r-project.org")'
+      - run: Rscript -e 'invisible(parse("r/claims-review.R"))'
+      - run: Rscript r/test-claims-review.R

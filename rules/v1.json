@@ -1,0 +1,68 @@
+{
+  "form": "verdifax.claims-review.rules.v1",
+  "version": "v1",
+  "published": "2026-11-08",
+  "note": "General writing rules for a claims review demo. They are not legal advice and not a compliance standard.",
+  "rules": [
+    {
+      "id": "rule-01",
+      "text": "Don't say a product is certified, compliant or approved without naming who said so."
+    },
+    {
+      "id": "rule-02",
+      "text": "Don't call anything unbreakable, tamper-proof or 100% secure."
+    },
+    {
+      "id": "rule-03",
+      "text": "Don't say \"patented\" unless a patent has actually issued."
+    },
+    {
+      "id": "rule-04",
+      "text": "Every number needs a stated source and date."
+    },
+    {
+      "id": "rule-05",
+      "text": "Words like \"every\", \"all\" and \"never\" need proof that they're true in every case."
+    },
+    {
+      "id": "rule-06",
+      "text": "Don't promise a legal result, such as \"admissible in court.\""
+    },
+    {
+      "id": "rule-07",
+      "text": "Say plainly what the product doesn't do, next to what it does."
+    },
+    {
+      "id": "rule-08",
+      "text": "Don't name a customer or partner without permission."
+    },
+    {
+      "id": "rule-09",
+      "text": "Don't describe a planned feature as if it exists today. Label it as planned."
+    },
+    {
+      "id": "rule-10",
+      "text": "Don't use \"guaranteed\" unless a written guarantee exists."
+    },
+    {
+      "id": "rule-11",
+      "text": "Don't claim to be \"the first\", \"the only\" or \"the leading\" without proof."
+    },
+    {
+      "id": "rule-12",
+      "text": "Don't compare against a competitor without a current, checkable source."
+    },
+    {
+      "id": "rule-13",
+      "text": "Don't quote a person or company without their approval and the exact wording."
+    },
+    {
+      "id": "rule-14",
+      "text": "Don't state a result as typical if it came from one test or one customer."
+    },
+    {
+      "id": "rule-15",
+      "text": "Don't imply that a regulator, government or standards body endorses the product unless it has said so in writing."
+    }
+  ]
+}

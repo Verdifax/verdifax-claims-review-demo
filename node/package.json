@@ -1,0 +1,15 @@
+{
+  "name": "verdifax-claims-review-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A claims review agent with every step sealed by Verdifax. A demo, not customer proof.",
+  "license": "MIT",
+  "bin": { "claims-review": "./claims-review.mjs" },
+  "scripts": { "test": "node --test" },
+  "dependencies": {
+    "@anthropic-ai/sdk": "1.6.0",
+    "verdifax": "1.5.0",
+    "zod": "4.6.7"
+  }
+}

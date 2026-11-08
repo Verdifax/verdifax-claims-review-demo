@@ -1,0 +1,22 @@
+{
+  "note": "Published Anthropic API prices in US dollars per million tokens, read on 2026-11-08 from Anthropic's model reference. Used only to print a measured cost; the program never seals a price.",
+  "read_on": "2026-11-08",
+  "prices": {
+    "claude-fable-5-1": {
+      "input": 10.0,
+      "output": 50.0
+    },
+    "claude-opus-5-5": {
+      "input": 4.0,
+      "output": 20.0
+    },
+    "claude-sonnet-5-5": {
+      "input": 2.0,
+      "output": 10.0
+    },
+    "claude-haiku-5-5": {
+      "input": 0.1,
+      "output": 0.5
+    }
+  }
+}

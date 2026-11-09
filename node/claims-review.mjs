@@ -33,7 +33,7 @@ import { APIError, VerdifaxClient, generateRequestKeyPair } from "verdifax";
 const DEFAULT_BASE_URL = "https://api.verdifax.com";
 const DEFAULT_MODEL = "claude-fable-5-1";
 const FORM = "verdifax.claims-review.v1";
-const RULE_SET = "v2";
+const RULE_SET = "v3";
 const ACTOR_ID = "claims-review-agent";
 const ROUTE_INTAKE = "claims-review/v1/intake";
 const ROUTE_RULE = "claims-review/v1/rule-check";
@@ -542,7 +542,7 @@ async function main() {
   }
 }
 
-export { canonical, draftClassification, loadRules, RULE_SET, sha256Hex };
+export { canonical, draftClassification, loadRules, RULE_SET, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((err) => {

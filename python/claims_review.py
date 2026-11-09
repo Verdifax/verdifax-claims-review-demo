@@ -44,7 +44,7 @@ from verdifax.exceptions import APIError
 DEFAULT_BASE_URL = "https://api.verdifax.com"
 DEFAULT_MODEL = "claude-fable-5-1"
 FORM = "verdifax.claims-review.v1"
-RULE_SET = "v2"
+RULE_SET = "v3"
 ACTOR_ID = "claims-review-agent"
 ROUTE_INTAKE = "claims-review/v1/intake"
 ROUTE_RULE = "claims-review/v1/rule-check"

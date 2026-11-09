@@ -1,0 +1,28 @@
+{
+  "note": "The cases every language's unit tests run against its handling of a stopped step (R152): a fake server answers from these rows, so each program finds the stopped run by its job and step, fetches the receipt of the stop's kind, and reports any other error as the server gave it.",
+  "job_id": "claims-review-stop-cases",
+  "error": {
+    "status": 502,
+    "message": "upstream unavailable"
+  },
+  "export_rows": [
+    { "run_id": 10, "step_id": "intake", "status": "ok" },
+    { "run_id": 11, "step_id": "rule-01", "status": "ok" },
+    { "run_id": 9, "step_id": "rule-02", "status": "pepg_deny" },
+    { "run_id": 12, "step_id": "rule-02", "status": "aivp_t4_halt" },
+    { "run_id": 13, "step_id": "rule-03", "status": "stage_error" }
+  ],
+  "stopped_run": [
+    { "step": "rule-02", "run_id": 12, "status": "aivp_t4_halt" },
+    { "step": "rule-03", "failure": "the server answered HTTP 502 at rule-03: upstream unavailable; it recorded no stop for this step, so nothing was sealed as one" },
+    { "step": "rule-04", "failure": "the server answered HTTP 502 at rule-04: upstream unavailable; it recorded no stop for this step, so nothing was sealed as one" }
+  ],
+  "receipts": [
+    { "run_id": 21, "status": "pepg_deny", "field": "deny_receipt", "hash": "1111111111111111111111111111111111111111111111111111111111111111" },
+    { "run_id": 22, "status": "aivp_t4_halt", "field": "aivp_t4_halt_receipt", "hash": "2222222222222222222222222222222222222222222222222222222222222222" },
+    { "run_id": 23, "status": "ccv_halt", "field": "ccv_halt_receipt", "hash": "3333333333333333333333333333333333333333333333333333333333333333" },
+    { "run_id": 24, "status": "macc_halt", "field": "macc_halt_receipt", "hash": "4444444444444444444444444444444444444444444444444444444444444444" },
+    { "run_id": 25, "status": "attestation_gap", "field": "attestation_gap_receipt", "hash": "5555555555555555555555555555555555555555555555555555555555555555" }
+  ],
+  "not_stopped": { "run_id": 30, "status": "ok", "failure": "run 30 is ok, not a stopped run with a receipt" }
+}

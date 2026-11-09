@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -48,7 +49,7 @@ const (
 	defaultBaseURL = "https://api.verdifax.com"
 	defaultModel   = "claude-fable-5-1"
 	form           = "verdifax.claims-review.v1"
-	ruleSet        = "v2"
+	ruleSet        = "v3"
 	actorID        = "claims-review-agent"
 	routeIntake    = "claims-review/v1/intake"
 	routeRule      = "claims-review/v1/rule-check"
@@ -115,9 +116,16 @@ func baseURL() string {
 
 func isProduction() bool { return baseURL() == defaultBaseURL }
 
+// failOut and exit are where fail writes and how it stops; the tests
+// replace them to read the message the program would print.
+var (
+	failOut io.Writer = os.Stderr
+	exit              = os.Exit
+)
+
 func fail(message string) {
-	fmt.Fprintln(os.Stderr, "claims-review:", message)
-	os.Exit(1)
+	fmt.Fprintln(failOut, "claims-review:", message)
+	exit(1)
 }
 
 func must(err error) {
@@ -490,7 +498,19 @@ var stopKinds = map[string]string{
 var stopReceiptFields = map[string]string{"pepg_deny": "deny_receipt", "aivp_t4_halt": "aivp_t4_halt_receipt",
 	"ccv_halt": "ccv_halt_receipt", "macc_halt": "macc_halt_receipt", "attestation_gap": "attestation_gap_receipt"}
 
-func stopReceipt(ctx context.Context, agent *verdifax.Client, status string, runID int64) map[string]any {
+// stopServer is what the stop handling reads from the server; the
+// client satisfies it, and the tests answer it from stop-cases.json.
+type stopServer interface {
+	GetRun(ctx context.Context, runID int64) (*verdifax.Run, error)
+	ExportRuns(ctx context.Context, params *verdifax.ExportRunsParams) (*verdifax.RunsExport, error)
+	GetDenyReceipt(ctx context.Context, runID int64) (map[string]any, error)
+	GetAivpT4HaltReceipt(ctx context.Context, runID int64) (map[string]any, error)
+	GetCCVHaltReceipt(ctx context.Context, runID int64) (map[string]any, error)
+	GetMACCHaltReceipt(ctx context.Context, runID int64) (map[string]any, error)
+	GetAttestationGapReceipt(ctx context.Context, runID int64) (map[string]any, error)
+}
+
+func stopReceipt(ctx context.Context, agent stopServer, status string, runID int64) map[string]any {
 	fetch := map[string]func(context.Context, int64) (map[string]any, error){
 		"pepg_deny": agent.GetDenyReceipt, "aivp_t4_halt": agent.GetAivpT4HaltReceipt, "ccv_halt": agent.GetCCVHaltReceipt,
 		"macc_halt": agent.GetMACCHaltReceipt, "attestation_gap": agent.GetAttestationGapReceipt,
@@ -502,7 +522,7 @@ func stopReceipt(ctx context.Context, agent *verdifax.Client, status string, run
 
 // stopReceiptHash is the sealed hash of a stopped run's receipt, whatever
 // kind of stop it was.
-func stopReceiptHash(ctx context.Context, agent *verdifax.Client, runID int64) string {
+func stopReceiptHash(ctx context.Context, agent stopServer, runID int64) string {
 	run, runErr := agent.GetRun(ctx, runID)
 	must(runErr)
 	if _, isStop := stopKinds[run.Status]; !isStop {
@@ -515,7 +535,7 @@ func stopReceiptHash(ctx context.Context, agent *verdifax.Client, runID int64) s
 
 // stoppedRun is the run the server sealed for this job's stopped step, found
 // by its job and step, never by being the newest of the key.
-func stoppedRun(ctx context.Context, agent *verdifax.Client, jobID, step string, apiErr *verdifax.APIError) verdifax.ExportRow {
+func stoppedRun(ctx context.Context, agent stopServer, jobID, step string, apiErr *verdifax.APIError) verdifax.ExportRow {
 	export, exportErr := agent.ExportRuns(ctx, &verdifax.ExportRunsParams{JobID: jobID})
 	must(exportErr)
 	var found verdifax.ExportRow

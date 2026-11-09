@@ -8,7 +8,7 @@ The same program is here in Python, Node, Go and R, built on the Verdifax SDK in
 
 - It is a demo, not customer proof. No customer is named.
 - A sealed record shows the checks ran and what the model returned. It does not show the model's judgment was right.
-- The 15 rules in [rules/v2.json](rules/v2.json) are general writing rules. They are not legal advice and not a compliance standard. Version 2 rewords rules 04, 05, 06 and 12 so each covers only what it was written for; [rules/v1.json](rules/v1.json) is kept as published for records sealed under it, and each record names the hash of the rule set it used.
+- The 15 rules in [rules/v3.json](rules/v3.json) are general writing rules. They are not legal advice and not a compliance standard. Version 2 reworded rules 04, 05, 06 and 12, and version 3 rewords rules 01 and 05, so each covers only what it was written for; [rules/v1.json](rules/v1.json) and [rules/v2.json](rules/v2.json) are kept as published for records sealed under them, and each record names the hash of the rule set it used.
 - The account policy judges what each step declared. It cannot show the declared facts are true.
 - A sign-off shows a registered approver key signed that decision on that exact result. It does not show who holds the key or that the review was careful, and Verdifax did not review the result.
 

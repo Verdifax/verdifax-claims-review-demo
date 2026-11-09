@@ -1,0 +1,70 @@
+{
+  "form": "verdifax.claims-review.rules.v1",
+  "version": "v3",
+  "published": "2026-11-09",
+  "supersedes": "v2",
+  "changes": "Rules 01 and 05 are reworded so each covers only what it was written for. In version 2, rule 01 was read as covering a statement of patent status, which rule 03 covers, and rule 05 was read as covering security claims, which rule 02 covers. The other thirteen rules keep their version 2 text. Records sealed under versions 1 and 2 name their hashes, and rules/v1.json and rules/v2.json are kept so a reader can recompute them.",
+  "note": "General writing rules for a claims review demo. They are not legal advice and not a compliance standard.",
+  "rules": [
+    {
+      "id": "rule-01",
+      "text": "Don't say a product is certified, compliant or approved without naming who said so. A statement of patent status is not a claim of certification, compliance or approval."
+    },
+    {
+      "id": "rule-02",
+      "text": "Don't call anything unbreakable, tamper-proof or 100% secure."
+    },
+    {
+      "id": "rule-03",
+      "text": "Don't say \"patented\" unless a patent has actually issued."
+    },
+    {
+      "id": "rule-04",
+      "text": "A measured figure, such as a speed, a saving, a rate or a count of customers, needs a stated source and date. Prices, trial lengths, ranges that describe who a product is for, version numbers, dates and a percentage used as an absolute claim rather than a measurement are not measured figures."
+    },
+    {
+      "id": "rule-05",
+      "text": "An absolute claim, using words such as \"every\", \"all\", \"never\" or \"no one\", needs proof that it holds in every case. A plain statement of what the product does not do or does not need is a stated limit, not an absolute claim. Don't use this rule for a security claim, such as calling something unbreakable, tamper-proof or 100% secure."
+    },
+    {
+      "id": "rule-06",
+      "text": "Don't promise a legal result, such as \"admissible in court\" or \"protects you from liability.\" A statement of the company's own patent status is not a promised legal result."
+    },
+    {
+      "id": "rule-07",
+      "text": "Say plainly what the product doesn't do, next to what it does."
+    },
+    {
+      "id": "rule-08",
+      "text": "Don't name a customer or partner without permission."
+    },
+    {
+      "id": "rule-09",
+      "text": "Don't describe a planned feature as if it exists today. Label it as planned."
+    },
+    {
+      "id": "rule-10",
+      "text": "Don't use \"guaranteed\" unless a written guarantee exists."
+    },
+    {
+      "id": "rule-11",
+      "text": "Don't claim to be \"the first\", \"the only\" or \"the leading\" without proof."
+    },
+    {
+      "id": "rule-12",
+      "text": "Don't compare against a named competitor without a current, checkable source. A claim of rank with no competitor named, such as \"the leading\", is not a comparison under this rule."
+    },
+    {
+      "id": "rule-13",
+      "text": "Don't quote a person or company without their approval and the exact wording."
+    },
+    {
+      "id": "rule-14",
+      "text": "Don't state a result as typical if it came from one test or one customer."
+    },
+    {
+      "id": "rule-15",
+      "text": "Don't imply that a regulator, government or standards body endorses the product unless it has said so in writing."
+    }
+  ]
+}

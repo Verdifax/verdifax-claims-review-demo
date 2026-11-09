@@ -18,6 +18,24 @@ PARITY = json.loads((HERE.parent / "demo-parity.json").read_text(encoding="utf-8
 STOPS = json.loads((HERE.parent / "testdata" / "stop-cases.json").read_text(encoding="utf-8"))
 
 
+class KeptTexts(unittest.TestCase):
+    """The review traces and model answers are kept byte for byte, so each
+    file hashes to the value its record seals."""
+
+    def test_each_text_is_written_exactly(self):
+        import hashlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            folder = pathlib.Path(d) / "traces"
+            texts = {"rule-01": "1. The vault is locked.\n\n2. Caf\u00e9 \u201cquoted\u201d.\n", "rule-02": "no trailing newline"}
+            cr.save_texts(folder, texts)
+            for step, text in texts.items():
+                kept = (folder / ("%s.txt" % step)).read_bytes()
+                self.assertEqual(hashlib.sha256(kept).hexdigest(), hashlib.sha256(text.encode("utf-8")).hexdigest())
+            cr.save_texts(pathlib.Path(d) / "none", {})
+            self.assertFalse((pathlib.Path(d) / "none").exists(), "no folder is made when there is nothing to keep")
+
+
 class CanonicalJSON(unittest.TestCase):
     def test_canonical_json_matches_every_language(self):
         self.assertEqual(cr.canonical(FIXED), EXPECTED)

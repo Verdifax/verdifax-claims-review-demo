@@ -8,13 +8,18 @@
 // cannot show the declared facts are true. A sign-off shows a registered
 // approver key signed that decision; it does not show who holds the key or
 // that the review was careful.
+// A decision means the same on every result: approve agrees with
+// the result signed, a verdict or the stop a receipt records, and reject
+// judges it wrong. A sign-off releases or blocks nothing on its own.
 //
 // Commands (the same in every language of this repository):
 //
 //	claims-review setup                              owner key in VERDIFAX_OWNER_KEY
 //	claims-review review DRAFT.md [--model ID]        model key in ANTHROPIC_API_KEY
 //	claims-review sign-off JOB_ID approve|reject [--note TEXT]
-//	claims-review sign-off --receipt RUN_ID reject
+//	claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT]
+//	claims-review publish JOB_ID | publish --receipt RUN_ID
+//	claims-review unpublish JOB_ID | unpublish --receipt RUN_ID
 //	claims-review feed
 //	claims-review verify-commands JOB_ID
 //
@@ -55,7 +60,16 @@ const (
 	routeRule      = "claims-review/v1/rule-check"
 	routeVerdict   = "claims-review/v1/verdict"
 	objectPrefix   = "claims-review/v1/"
-	minVerifier    = "v0.24.0"
+	minVerifier    = "v0.27.0"
+	// A stopped step's records live in records/stopped-<run_id>/, and the
+	// model's exact answers in answers/ beside each job's steps/.
+	stoppedFolderPrefix = "stopped-"
+	answersFolder       = "answers"
+	// The text the server's AI review checked for each step, as the server
+	// returned it once: a reader re-runs the review's check from these files.
+	tracesFolder = "traces"
+	// The account policy setup activates; v1 stays for records sealed under it.
+	policyFile = "claims-review-v2.json"
 )
 
 var levels = map[string]bool{"PUBLIC": true, "INTERNAL": true, "CONFIDENTIAL": true, "RESTRICTED": true, "TOP_SECRET": true, "TS_SCI": true}
@@ -223,7 +237,7 @@ func clientFor(secret, signingHex string) *verdifax.Client {
 
 func cmdSetup(ctx context.Context) {
 	if _, statErr := os.Stat("demo-keys.json"); statErr == nil {
-		fail("demo-keys.json exists here; setup runs once per account and folder")
+		fail("demo-keys.json exists here; this folder is already set up, and every program in this repository uses it")
 	}
 	ownerSecret := os.Getenv("VERDIFAX_OWNER_KEY")
 	if ownerSecret == "" {
@@ -243,7 +257,7 @@ func cmdSetup(ctx context.Context) {
 	must(agentErr)
 	_, agentRegisterErr := agent.RegisterRequestKey(ctx)
 	must(agentRegisterErr)
-	uploaded, uploadErr := owner.UploadAccountPolicy(ctx, string(readFile(filepath.Join(repo, "policy", "claims-review-v1.json"))))
+	uploaded, uploadErr := owner.UploadAccountPolicy(ctx, string(readFile(filepath.Join(repo, "policy", policyFile))))
 	must(uploadErr)
 	_, activateErr := owner.ActivateAccountPolicy(ctx, uploaded.DocumentHash)
 	must(activateErr)
@@ -394,7 +408,8 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string) {
 		// The account policy refused the draft at intake (for example a
 		// confidential draft), so it never reached a model. The refusal is
 		// sealed as a receipt; nothing else runs for this draft.
-		refuse(ctx, agent, jobID, "intake", map[string]int64{}, map[string]any{"intake": intakePayload}, draftPath, draftHash, apiErr)
+		stop(ctx, agent, jobID, "intake", map[string]int64{}, map[string]any{"intake": intakePayload}, map[string]string{}, draftPath, draftHash,
+			apiErr, model, 0, 0, map[string]bool{}, map[string]string{})
 		return
 	}
 	must(intakeErr)
@@ -405,6 +420,11 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string) {
 	var failed []string
 	var inputTokens, outputTokens int64
 	models := map[string]bool{}
+	// The model's exact answer, the text Verdifax's AI review reads, kept as
+	// sent so a reader recomputes the sealed ai_output_hash from the file.
+	answerTexts := map[string]string{}
+	// The text the server's AI review checked, returned once with each step.
+	traceTexts := map[string]string{}
 	ruleIDs := make([]string, 0, len(rules))
 	for _, r := range rules {
 		ruleIDs = append(ruleIDs, r.ID)
@@ -421,6 +441,7 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string) {
 		if aiText == "" {
 			aiText = a.Reason
 		}
+		answerTexts[r.ID] = aiText
 		receipt, stepErr := job.Step(ctx, r.ID, &verdifax.AttestRequest{PayloadText: canonical(payload), ProgramID: programID,
 			RouteID: routeRule, RegistryRecordHash: registryRecordHash, AIOutputText: aiText,
 			AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "model_provider": "anthropic", "model_name": a.Model,
@@ -433,10 +454,17 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string) {
 			// kept beside it, and a person sees the stop. The job never gets
 			// a verdict.
 			payloads[r.ID] = payload
-			refuse(ctx, agent, jobID, r.ID, runIDs, payloads, draftPath, draftHash, apiErr)
+			if apiErr.AivpTraceText != "" {
+				traceTexts[r.ID] = apiErr.AivpTraceText
+			}
+			stop(ctx, agent, jobID, r.ID, runIDs, payloads, answerTexts, draftPath, draftHash, apiErr, model, inputTokens, outputTokens, models,
+				traceTexts)
 			return
 		}
 		must(stepErr)
+		if receipt.AivpTraceText != "" {
+			traceTexts[r.ID] = receipt.AivpTraceText
+		}
 		payloads[r.ID] = payload
 		runIDs[r.ID] = receipt.RunID
 		results = append(results, map[string]any{"rule_id": r.ID, "verdict": a.Verdict, "reason": a.Reason})
@@ -463,6 +491,8 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string) {
 	runIDs["verdict"] = final.RunID
 
 	saveJobRecords(ctx, agent, jobID, out, runIDs, payloads)
+	saveAnswers(out, answerTexts)
+	saveTexts(filepath.Join(out, tracesFolder), traceTexts)
 	modelList := make([]string, 0, len(models))
 	for m := range models {
 		modelList = append(modelList, m)
@@ -555,12 +585,13 @@ func stoppedRun(ctx context.Context, agent stopServer, jobID, step string, apiEr
 // sealed before it, the exact payload bytes of every step including the
 // stopped one, and a summary naming the step and the kind of stop. The same
 // for intake and for any later step.
-func refuse(ctx context.Context, agent *verdifax.Client, jobID, step string, runIDs map[string]int64, payloads map[string]any,
-	draftPath, draftHash string, apiErr *verdifax.APIError) {
+func stop(ctx context.Context, agent *verdifax.Client, jobID, step string, runIDs map[string]int64, payloads map[string]any,
+	answerTexts map[string]string, draftPath, draftHash string, apiErr *verdifax.APIError, model string, inputTokens, outputTokens int64,
+	models map[string]bool, traceTexts map[string]string) {
 	row := stoppedRun(ctx, agent, jobID, step, apiErr)
-	refused := row.RunID
-	folder := filepath.Join("records", fmt.Sprintf("refused-%d", refused)) // named by the run, so two refusals never share a folder
-	writeJSON(filepath.Join(folder, "receipt.json"), stopReceipt(ctx, agent, row.Status, refused))
+	stopped := row.RunID
+	folder := stoppedFolder(stopped) // named by the run, so two stops never share a folder
+	writeJSON(filepath.Join(folder, "receipt.json"), stopReceipt(ctx, agent, row.Status, stopped))
 	for sealedStep, runID := range runIDs {
 		artifacts, artifactsErr := agent.GetRunArtifacts(ctx, runID)
 		must(artifactsErr)
@@ -569,10 +600,47 @@ func refuse(ctx context.Context, agent *verdifax.Client, jobID, step string, run
 	for name, payload := range payloads {
 		writeText(filepath.Join(folder, "payloads", name+".json"), canonical(payload))
 	}
-	writeJSON(filepath.Join(folder, "job.json"), map[string]any{"refused_run_id": refused, "step": step, "stop_status": row.Status,
-		"job_id": jobID, "draft": draftPath, "draft_sha256": draftHash, "reason": apiErr.Message, "run_ids": runIDs})
-	fmt.Printf("refused at %s by %s: run %d, %s\n", step, stopKinds[row.Status], refused, apiErr.Message)
+	saveAnswers(folder, answerTexts)
+	saveTexts(filepath.Join(folder, tracesFolder), traceTexts)
+	modelList := make([]string, 0, len(models))
+	for m := range models {
+		modelList = append(modelList, m)
+	}
+	sort.Strings(modelList)
+	var cost any // any: a JSON null when the model's price is not known
+	if len(modelList) == 1 && modelList[0] == model {
+		if c, known := measuredCost(model, inputTokens, outputTokens); known {
+			cost = c
+		}
+	}
+	writeJSON(filepath.Join(folder, "job.json"), map[string]any{"stopped_run_id": stopped, "step": step, "stop_status": row.Status,
+		"job_id": jobID, "draft": draftPath, "draft_sha256": draftHash, "reason": apiErr.Message, "run_ids": runIDs,
+		"models": modelList, "measured_tokens": map[string]int64{"input": inputTokens, "output": outputTokens}, "measured_cost_usd": cost})
+	fmt.Printf("stopped at %s by %s: run %d, %s\n", step, stopKinds[row.Status], stopped, apiErr.Message)
 	fmt.Printf("records in %s\n", folder)
+	if c, isCost := cost.(float64); isCost {
+		fmt.Printf("measured model use before the stop: %d input and %d output tokens, about $%.2f at published prices\n", inputTokens, outputTokens, c)
+	}
+}
+
+// saveAnswers writes the model's exact answers, one file per step, so each
+// sealed ai_output_hash recomputes from its file.
+// saveTexts writes each step's text to <folder>/<step>.txt, byte for byte.
+func saveTexts(folder string, texts map[string]string) {
+	for step, text := range texts {
+		writeText(filepath.Join(folder, step+".txt"), text)
+	}
+}
+
+func saveAnswers(folder string, answerTexts map[string]string) {
+	for step, text := range answerTexts {
+		writeText(filepath.Join(folder, answersFolder, step+".txt"), text)
+	}
+}
+
+// stoppedFolder is the folder of the stopped step whose receipt is run runID.
+func stoppedFolder(runID int64) string {
+	return filepath.Join("records", fmt.Sprintf("%s%d", stoppedFolderPrefix, runID))
 }
 
 func saveJobRecords(ctx context.Context, agent *verdifax.Client, jobID, out string, runIDs map[string]int64, payloads map[string]any) {
@@ -629,16 +697,7 @@ func cmdSignOff(ctx context.Context, jobID, decision, note, receiptRunID string)
 		must(parseErr)
 		runID = parsed
 		target = verdifax.SignOffTarget{Kind: verdifax.SignOffTargetReceipt, RunID: runID, Digest: stopReceiptHash(ctx, agent, runID)}
-		folder = filepath.Join("records", fmt.Sprintf("receipt-%d", runID))
-		matches, _ := filepath.Glob(filepath.Join("records", "refused-*", "job.json"))
-		for _, m := range matches {
-			var summary struct {
-				RefusedRunID int64 `json:"refused_run_id"`
-			}
-			if json.Unmarshal(readFile(m), &summary) == nil && summary.RefusedRunID == runID {
-				folder = filepath.Dir(m)
-			}
-		}
+		folder = stoppedFolder(runID)
 		recordFile = "receipt.json"
 	} else {
 		folder = filepath.Join("records", jobID)
@@ -677,22 +736,23 @@ func cmdSignOff(ctx context.Context, jobID, decision, note, receiptRunID string)
 // and placed in the account's feed, which feed then reads.
 
 // publicationTargets is the folder and the records a publish or unpublish
-// acts on: every step of a job, or one refusal's receipt.
+// acts on: every step of a job, or a stopped step's receipt with every step
+// the job sealed before it, so a reader sees what the job did before it
+// stopped.
 func publicationTargets(jobID, receipt string) (string, map[string]int64) {
 	if receipt != "" {
 		runID, parseErr := strconv.ParseInt(receipt, 10, 64)
 		must(parseErr)
-		folder := filepath.Join("records", fmt.Sprintf("receipt-%d", runID))
-		matches, _ := filepath.Glob(filepath.Join("records", "refused-*", "job.json"))
-		for _, m := range matches {
-			var summary struct {
-				RefusedRunID int64 `json:"refused_run_id"`
-			}
-			if json.Unmarshal(readFile(m), &summary) == nil && summary.RefusedRunID == runID {
-				folder = filepath.Dir(m)
-			}
+		folder := stoppedFolder(runID)
+		var summary struct {
+			RunIDs map[string]int64 `json:"run_ids"`
 		}
-		return folder, map[string]int64{"receipt": runID}
+		must(json.Unmarshal(readFile(filepath.Join(folder, "job.json")), &summary))
+		targets := map[string]int64{"receipt": runID}
+		for step, id := range summary.RunIDs {
+			targets[step] = id
+		}
+		return folder, targets
 	}
 	folder := filepath.Join("records", jobID)
 	var summary struct {
@@ -711,6 +771,16 @@ func cmdPublication(ctx context.Context, jobID, receipt string, publish bool) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// A repeated publish changes nothing and the server answers with no new
+	// publication, so the sealed publication saved earlier is kept.
+	earlier := map[string]struct {
+		RunID       int64           `json:"run_id"`
+		Public      bool            `json:"public"`
+		Publication json.RawMessage `json:"publication"`
+	}{}
+	if text, readErr := os.ReadFile(filepath.Join(folder, "published.json")); readErr == nil {
+		must(json.Unmarshal(text, &earlier))
+	}
 	published := map[string]any{}
 	var shown *verdifax.PublicationResult
 	for _, name := range names {
@@ -732,8 +802,15 @@ func cmdPublication(ctx context.Context, jobID, receipt string, publish bool) {
 		if answer.PublicReceiptURL != "" {
 			receiptLink = answer.PublicReceiptURL
 		}
+		var sealed any = answer.Publication // any: the sealed publication, or one saved earlier, as JSON
+		if answer.Publication == nil {
+			sealed = nil
+			if e, saved := earlier[name]; saved && e.RunID == runID && e.Public == answer.Public && len(e.Publication) > 0 && string(e.Publication) != "null" {
+				sealed = e.Publication
+			}
+		}
 		published[name] = map[string]any{"run_id": runID, "public": answer.Public, "public_bundle_url": bundleLink,
-			"public_receipt_url": receiptLink, "verify_url": answer.VerifyURL, "publication": answer.Publication}
+			"public_receipt_url": receiptLink, "verify_url": answer.VerifyURL, "publication": sealed}
 		if name == "verdict" || name == "receipt" || shown == nil {
 			shown = answer
 		}
@@ -791,8 +868,12 @@ func cmdFeed(ctx context.Context) {
 func printVerifyCommands(jobID string) {
 	folder := filepath.Join("records", jobID)
 	fmt.Printf("verify with verdifax-verify %s or later:\n", minVerifier)
-	fmt.Printf("  verdifax-verify --job %s\n", filepath.Join(folder, "steps"))
-	fmt.Printf("  verdifax-verify --account-policy %s %s\n", filepath.Join(repo, "policy", "claims-review-v1.json"), filepath.Join(folder, "steps", "verdict.json"))
+	traces := ""
+	if info, statErr := os.Stat(filepath.Join(folder, tracesFolder)); statErr == nil && info.IsDir() {
+		traces = " --aivp-traces " + filepath.Join(folder, tracesFolder)
+	}
+	fmt.Printf("  verdifax-verify --job %s%s\n", filepath.Join(folder, "steps"), traces)
+	fmt.Printf("  verdifax-verify --account-policy %s %s\n", filepath.Join(repo, "policy", policyFile), filepath.Join(folder, "steps", "verdict.json"))
 	if _, statErr := os.Stat(filepath.Join(folder, "signoffs.json")); statErr == nil {
 		fmt.Printf("  verdifax-verify --signoff %s --approver-key approver.txt %s\n", filepath.Join(folder, "signoffs.json"), filepath.Join(folder, "steps", "verdict.json"))
 	}
@@ -817,7 +898,7 @@ func takeOption(args []string, name string) (string, []string) {
 
 func main() {
 	ctx := context.Background()
-	usage := "commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, feed, verify-commands JOB_ID"
+	usage := "commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, feed, verify-commands JOB_ID"
 	if len(os.Args) < 2 {
 		fail(usage)
 	}

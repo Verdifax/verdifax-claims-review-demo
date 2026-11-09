@@ -99,7 +99,7 @@
     "route_rule": "claims-review/v1/rule-check",
     "route_verdict": "claims-review/v1/verdict",
     "object_prefix": "claims-review/v1/",
-    "min_verifier": "v0.24.0",
+    "min_verifier": "v0.27.0",
     "program_id_source": "verdifax-claims-review-demo/program/v1",
     "registry_record_hash_source": "verdifax-claims-review-demo/registry/v1",
     "decision_kinds": [
@@ -110,7 +110,11 @@
       "pass",
       "fail",
       "unanswered"
-    ]
+    ],
+    "stopped_folder_prefix": "stopped-",
+    "answers_folder": "answers",
+    "traces_folder": "traces",
+    "policy_file": "claims-review-v2.json"
   },
   "steps": {
     "intake": "intake",
@@ -197,15 +201,18 @@
     "measured_cost_usd"
   ],
   "prompt_hash": "sha256 of the prompt file's bytes, a newline, and the user text 'Rule <id>: <text>\\n\\nDraft:\\n<draft>'",
-  "refused_summary_fields": [
-    "refused_run_id",
+  "stopped_summary_fields": [
+    "stopped_run_id",
     "step",
+    "stop_status",
     "job_id",
     "draft",
     "draft_sha256",
     "reason",
     "run_ids",
-    "stop_status"
+    "models",
+    "measured_tokens",
+    "measured_cost_usd"
   ],
   "published_fields": [
     "run_id",

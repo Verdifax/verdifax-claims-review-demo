@@ -8,14 +8,18 @@ what the model answered; it does not show the model's judgment was right. The
 standard. The account policy judges what each step declared; it cannot show
 the declared facts are true. A sign-off shows a registered approver key signed
 that decision; it does not show who holds the key or that the review was
-careful.
+careful. A decision means the same on every result: approve agrees with
+the result signed, a verdict or the stop a receipt records, and reject
+judges it wrong. A sign-off releases or blocks nothing on its own.
 
 Commands (the same in every language of this repository):
 
   claims-review setup                              owner key in VERDIFAX_OWNER_KEY
   claims-review review DRAFT.md [--model ID]        model key in ANTHROPIC_API_KEY
   claims-review sign-off JOB_ID approve|reject [--note TEXT]
-  claims-review sign-off --receipt RUN_ID reject
+  claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT]
+  claims-review publish JOB_ID | publish --receipt RUN_ID
+  claims-review unpublish JOB_ID | unpublish --receipt RUN_ID
   claims-review feed
   claims-review verify-commands JOB_ID
 
@@ -52,7 +56,16 @@ ROUTE_VERDICT = "claims-review/v1/verdict"
 OBJECT_PREFIX = "claims-review/v1/"
 LEVELS = ("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
 VERDICTS = ("pass", "fail", "unanswered")
-MIN_VERIFIER = "v0.24.0"
+MIN_VERIFIER = "v0.27.0"
+# A stopped step's records live in records/stopped-<run_id>/, and the
+# model's exact answers in answers/ beside each job's steps/.
+STOPPED_FOLDER_PREFIX = "stopped-"
+ANSWERS_FOLDER = "answers"
+# The text the server's AI review checked for each step, as the server
+# returned it once: a reader re-runs the review's check from these files.
+TRACES_FOLDER = "traces"
+# The account policy setup activates; v1 stays for records sealed under it.
+POLICY_FILE = "claims-review-v2.json"
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 
@@ -131,7 +144,7 @@ def client_for(key: dict[str, Any]) -> verdifax.VerdifaxClient:
 
 def cmd_setup(_: argparse.Namespace) -> None:
     if keys_path().exists():
-        fail("demo-keys.json exists here; setup runs once per account and folder")
+        fail("demo-keys.json exists here; this folder is already set up, and every program in this repository uses it")
     owner_secret = os.environ.get("VERDIFAX_OWNER_KEY", "")
     if not owner_secret:
         fail("set VERDIFAX_OWNER_KEY to the account's owner key")
@@ -142,7 +155,7 @@ def cmd_setup(_: argparse.Namespace) -> None:
     member_signer = verdifax.generate_request_key()
     agent = verdifax.VerdifaxClient(base_url=base_url(), api_key=member["secret"], signing_key=member_signer.private_key)
     agent.register_request_key()
-    policy_text = (REPO / "policy" / "claims-review-v1.json").read_text(encoding="utf-8")
+    policy_text = (REPO / "policy" / POLICY_FILE).read_text(encoding="utf-8")
     uploaded = owner.upload_account_policy(policy_text)
     owner.activate_account_policy(uploaded["document_hash"])
     approver = verdifax.generate_request_key()
@@ -234,7 +247,8 @@ def cmd_review(args: argparse.Namespace) -> None:
         # The account policy refused the draft at intake (for example a
         # confidential draft), so it never reached a model. The refusal is
         # sealed as a receipt; nothing else runs for this draft.
-        refuse(agent, job_id, "intake", {}, {"intake": intake_payload}, str(draft_path), draft_hash, exc)
+        stop(agent, job_id, "intake", {}, {"intake": intake_payload}, {}, str(draft_path), draft_hash, exc, args.model,
+             {"input": 0, "output": 0}, set(), {})
         return
     payloads["intake"] = intake_payload
     run_ids = {"intake": intake.run_id}
@@ -242,6 +256,11 @@ def cmd_review(args: argparse.Namespace) -> None:
     results: list[dict[str, Any]] = []
     tokens = {"input": 0, "output": 0}
     models: set[str] = set()
+    # The model's exact answer, the text Verdifax's AI review reads, kept as
+    # sent so a reader recomputes the sealed ai_output_hash from the file.
+    answer_texts: dict[str, str] = {}
+    # The text the server's AI review checked, returned once with each step.
+    trace_texts: dict[str, str] = {}
     for rule in rules:
         user_text = "Rule %s: %s\n\nDraft:\n%s" % (rule["id"], rule["text"], draft)
         prompt_hash = sha256_hex((prompt + "\n" + user_text).encode("utf-8"))
@@ -249,12 +268,13 @@ def cmd_review(args: argparse.Namespace) -> None:
         tokens["input"] += answer["input_tokens"]
         tokens["output"] += answer["output_tokens"]
         models.add(answer["model"])
+        answer_texts[rule["id"]] = answer["raw"] or answer["reason"]
         payload = {"form": FORM, "step": rule["id"], "rule_id": rule["id"], "rule_text": rule["text"], "draft_sha256": draft_hash,
                    "rule_set_hash": rule_set_hash, "model": answer["model"], "model_response_id": answer["response_id"],
                    "prompt_hash": prompt_hash, "verdict": answer["verdict"], "reason": answer["reason"]}
         try:
             receipt = job.step(rule["id"], after=["intake"], payload=canonical(payload), program_id=PROGRAM_ID, route_id=ROUTE_RULE,
-                               registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer["raw"] or answer["reason"],
+                               registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer_texts[rule["id"]],
                                attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
                                                                          model_name=answer["model"], prompt_hash=prompt_hash,
                                                                          decision_kind="claims.rule_check", decision_result=answer["verdict"]),
@@ -266,8 +286,13 @@ def cmd_review(args: argparse.Namespace) -> None:
             # kept beside it, and a person sees the stop. The job never gets
             # a verdict.
             payloads[rule["id"]] = payload
-            refuse(agent, job_id, rule["id"], run_ids, payloads, str(draft_path), draft_hash, exc)
+            if exc.aivp_trace_text:
+                trace_texts[rule["id"]] = exc.aivp_trace_text
+            stop(agent, job_id, rule["id"], run_ids, payloads, answer_texts, str(draft_path), draft_hash, exc, args.model, tokens, models,
+                 trace_texts)
             return
+        if receipt.aivp_trace_text:
+            trace_texts[rule["id"]] = receipt.aivp_trace_text
         payloads[rule["id"]] = payload
         run_ids[rule["id"]] = receipt.run_id
         results.append({"rule_id": rule["id"], "verdict": answer["verdict"], "reason": answer["reason"]})
@@ -285,6 +310,8 @@ def cmd_review(args: argparse.Namespace) -> None:
     run_ids["verdict"] = final.run_id
 
     save_job_records(agent, job_id, out, run_ids, payloads)
+    save_answers(out, answer_texts)
+    save_texts(out / TRACES_FOLDER, trace_texts)
     cost = measured_cost(args.model, tokens["input"], tokens["output"]) if len(models) == 1 and args.model in models else None
     summary = {"job_id": job_id, "draft": str(draft_path), "draft_sha256": draft_hash, "rule_set_hash": rule_set_hash,
                "verdict": verdict_payload["verdict"], "failed_rules": failed, "models": sorted(models),
@@ -336,26 +363,57 @@ def stopped_run(agent: verdifax.VerdifaxClient, job_id: str, step: str, exc: API
     return max(rows, key=lambda r: r.run_id)
 
 
-def refuse(agent: verdifax.VerdifaxClient, job_id: str, step: str, run_ids: dict[str, int], payloads: dict[str, Any],
-           draft: str, draft_hash: str, exc: APIError) -> None:
+def save_texts(folder: Path, texts: dict[str, str]) -> None:
+    """Writes each step's text to <folder>/<step>.txt, byte for byte."""
+    if not texts:
+        return
+    folder.mkdir(parents=True, exist_ok=True)
+    for step, text in texts.items():
+        (folder / ("%s.txt" % step)).write_bytes(text.encode("utf-8"))
+
+
+def save_answers(folder: Path, answer_texts: dict[str, str]) -> None:
+    """The model's exact answers, one file per step, so each sealed
+    ai_output_hash recomputes from its file."""
+    (folder / ANSWERS_FOLDER).mkdir(parents=True, exist_ok=True)
+    for step, text in answer_texts.items():
+        (folder / ANSWERS_FOLDER / ("%s.txt" % step)).write_bytes(text.encode("utf-8"))
+
+
+def stopped_folder(run_id: int) -> Path:
+    """The folder of the stopped step whose receipt is run run_id."""
+    return Path("records") / ("%s%d" % (STOPPED_FOLDER_PREFIX, run_id))
+
+
+def stop(agent: verdifax.VerdifaxClient, job_id: str, step: str, run_ids: dict[str, int], payloads: dict[str, Any],
+         answer_texts: dict[str, str], draft: str, draft_hash: str, exc: APIError, model: str, tokens: dict[str, int],
+         models: set[str], trace_texts: dict[str, str]) -> None:
     """Record a stopped step: its sealed receipt, every record the job sealed
-    before it, the exact payload bytes of every step including the stopped
-    one, and a summary naming the step and the kind of stop. The same for
-    intake and for any later step."""
+    before it, the exact payload bytes and model answers of every step
+    including the stopped one, the model use spent before the stop, and a
+    summary naming the step and the kind of stop. The same for intake and for
+    any later step."""
     row = stopped_run(agent, job_id, step, exc)
-    refused = row.run_id
-    folder = Path("records") / ("refused-%d" % refused)  # named by the run, so two refusals never share a folder
-    write_json(folder / "receipt.json", stop_receipt(agent, row.status, refused))
+    stopped = row.run_id
+    folder = stopped_folder(stopped)  # named by the run, so two stops never share a folder
+    write_json(folder / "receipt.json", stop_receipt(agent, row.status, stopped))
     for sealed_step, run_id in run_ids.items():
         (folder / "steps").mkdir(parents=True, exist_ok=True)
         (folder / "steps" / ("%s.json" % sealed_step)).write_text(agent.get_run_artifacts(run_id), encoding="utf-8")
     (folder / "payloads").mkdir(parents=True, exist_ok=True)
     for name, payload in payloads.items():
         (folder / "payloads" / ("%s.json" % name)).write_text(canonical(payload), encoding="utf-8")
-    write_json(folder / "job.json", {"refused_run_id": refused, "step": step, "stop_status": row.status, "job_id": job_id,
-                                     "draft": draft, "draft_sha256": draft_hash, "reason": exc.message, "run_ids": run_ids})
-    print("refused at %s by %s: run %d, %s" % (step, STOP_KINDS[row.status], refused, exc.message))
+    save_answers(folder, answer_texts)
+    save_texts(folder / TRACES_FOLDER, trace_texts)
+    cost = measured_cost(model, tokens["input"], tokens["output"]) if len(models) == 1 and model in models else None
+    write_json(folder / "job.json", {"stopped_run_id": stopped, "step": step, "stop_status": row.status, "job_id": job_id,
+                                     "draft": draft, "draft_sha256": draft_hash, "reason": exc.message, "run_ids": run_ids,
+                                     "models": sorted(models), "measured_tokens": tokens, "measured_cost_usd": cost})
+    print("stopped at %s by %s: run %d, %s" % (step, STOP_KINDS[row.status], stopped, exc.message))
     print("records in %s" % folder)
+    if cost is not None:
+        print("measured model use before the stop: %d input and %d output tokens, about $%.2f at published prices"
+              % (tokens["input"], tokens["output"], cost))
 
 
 def save_job_records(agent: verdifax.VerdifaxClient, job_id: str, out: Path, run_ids: dict[str, int], payloads: dict[str, Any]) -> None:
@@ -395,8 +453,7 @@ def cmd_sign_off(args: argparse.Namespace) -> None:
     if args.receipt:
         run_id = int(args.receipt)
         target = {"kind": "receipt", "run_id": run_id, "digest": stop_receipt_hash(agent, run_id)}
-        folder = next((p for p in Path("records").glob("refused-*") if (p / "job.json").exists()
-                       and json.loads((p / "job.json").read_text())["refused_run_id"] == run_id), Path("records") / ("receipt-%d" % run_id))
+        folder = stopped_folder(run_id)
     else:
         folder = Path("records") / args.job_id
         summary = json.loads((folder / "job.json").read_text(encoding="utf-8"))
@@ -421,12 +478,13 @@ def cmd_sign_off(args: argparse.Namespace) -> None:
 
 def publication_targets(job_id: Optional[str], receipt: Optional[str]) -> tuple[Path, dict[str, int]]:
     """The folder and the records a publish or unpublish acts on: every step
-    of a job, or one refusal's receipt."""
+    of a job, or a stopped step's receipt with every step the job sealed
+    before it, so a reader sees what the job did before it stopped."""
     if receipt:
         run_id = int(receipt)
-        folder = next((p for p in Path("records").glob("refused-*") if (p / "job.json").exists()
-                       and json.loads((p / "job.json").read_text())["refused_run_id"] == run_id), Path("records") / ("receipt-%d" % run_id))
-        return folder, {"receipt": run_id}
+        folder = stopped_folder(run_id)
+        summary = json.loads((folder / "job.json").read_text(encoding="utf-8"))
+        return folder, dict(summary["run_ids"], receipt=run_id)
     folder = Path("records") / str(job_id)
     summary = json.loads((folder / "job.json").read_text(encoding="utf-8"))
     return folder, dict(summary["run_ids"])
@@ -436,15 +494,21 @@ def publication(args: argparse.Namespace, publish: bool) -> None:
     keys = load_keys()
     owner = client_for(keys["owner"])
     folder, targets = publication_targets(args.job_id, args.receipt)
+    # A repeated publish changes nothing and the server answers with no new
+    # publication, so the sealed publication saved earlier is kept.
+    earlier = json.loads((folder / "published.json").read_text(encoding="utf-8")) if (folder / "published.json").exists() else {}
     published: dict[str, Any] = {}
     for name in sorted(targets):
         run_id = targets[name]
         answer = owner.publish_run(run_id) if publish else owner.unpublish_run(run_id)
         # A completed run is served at its bundle address, a stopped run at
         # its receipt address (R156); each answer names only the one it has.
+        sealed = answer["publication"]
+        if sealed is None and earlier.get(name, {}).get("run_id") == run_id and earlier[name].get("public") == answer["public"]:
+            sealed = earlier[name].get("publication")
         published[name] = {"run_id": run_id, "public": answer["public"], "public_bundle_url": answer.get("public_bundle_url"),
                            "public_receipt_url": answer.get("public_receipt_url"),
-                           "verify_url": answer["verify_url"], "publication": answer["publication"]}
+                           "verify_url": answer["verify_url"], "publication": sealed}
     write_json(folder / "published.json", published)
     print("%s %d record(s) in %s" % ("published" if publish else "withdrawn", len(published), folder))
     if publish:
@@ -485,8 +549,9 @@ def cmd_feed(_: argparse.Namespace) -> None:
 def print_verify_commands(job_id: str) -> None:
     folder = Path("records") / job_id
     print("verify with verdifax-verify %s or later:" % MIN_VERIFIER)
-    print("  verdifax-verify --job %s" % (folder / "steps"))
-    print("  verdifax-verify --account-policy %s %s" % (REPO / "policy" / "claims-review-v1.json", folder / "steps" / "verdict.json"))
+    traces = " --aivp-traces %s" % (folder / TRACES_FOLDER) if (folder / TRACES_FOLDER).is_dir() else ""
+    print("  verdifax-verify --job %s%s" % (folder / "steps", traces))
+    print("  verdifax-verify --account-policy %s %s" % (REPO / "policy" / POLICY_FILE, folder / "steps" / "verdict.json"))
     if (folder / "signoffs.json").exists():
         print("  verdifax-verify --signoff %s --approver-key approver.txt %s" % (folder / "signoffs.json", folder / "steps" / "verdict.json"))
     if Path("signals.json").exists():
@@ -510,12 +575,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     sign.add_argument("job_id", nargs="?")
     sign.add_argument("decision", choices=("approve", "reject"))
     sign.add_argument("--note")
-    sign.add_argument("--receipt", help="sign off a refusal's receipt by run id")
+    sign.add_argument("--receipt", help="sign off a stopped step's receipt by run id")
     sign.set_defaults(fn=cmd_sign_off)
     for name, fn in (("publish", cmd_publish), ("unpublish", cmd_unpublish)):
         pub = sub.add_parser(name)
         pub.add_argument("job_id", nargs="?")
-        pub.add_argument("--receipt", help="act on a refusal's receipt by run id")
+        pub.add_argument("--receipt", help="act on a stopped step's receipt, and the steps sealed before it, by run id")
         pub.set_defaults(fn=fn)
     sub.add_parser("feed").set_defaults(fn=cmd_feed)
     verify = sub.add_parser("verify-commands")

@@ -9,13 +9,18 @@
 // cannot show the declared facts are true. A sign-off shows a registered
 // approver key signed that decision; it does not show who holds the key or
 // that the review was careful.
+// A decision means the same on every result: approve agrees with
+// the result signed, a verdict or the stop a receipt records, and reject
+// judges it wrong. A sign-off releases or blocks nothing on its own.
 //
 // Commands (the same in every language of this repository):
 //
 //   claims-review setup                              owner key in VERDIFAX_OWNER_KEY
 //   claims-review review DRAFT.md [--model ID]        model key in ANTHROPIC_API_KEY
 //   claims-review sign-off JOB_ID approve|reject [--note TEXT]
-//   claims-review sign-off --receipt RUN_ID reject
+//   claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT]
+//   claims-review publish JOB_ID | publish --receipt RUN_ID
+//   claims-review unpublish JOB_ID | unpublish --receipt RUN_ID
 //   claims-review feed
 //   claims-review verify-commands JOB_ID
 //
@@ -25,7 +30,7 @@
 // signals.json.
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { APIError, VerdifaxClient, generateRequestKeyPair } from "verdifax";
@@ -40,7 +45,16 @@ const ROUTE_RULE = "claims-review/v1/rule-check";
 const ROUTE_VERDICT = "claims-review/v1/verdict";
 const OBJECT_PREFIX = "claims-review/v1/";
 const LEVELS = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI"];
-const MIN_VERIFIER = "v0.24.0";
+const MIN_VERIFIER = "v0.27.0";
+// A stopped step's records live in records/stopped-<run_id>/, and the
+// model's exact answers in answers/ beside each job's steps/.
+const STOPPED_FOLDER_PREFIX = "stopped-";
+const ANSWERS_FOLDER = "answers";
+// The text the server's AI review checked for each step, as the server
+// returned it once: a reader re-runs the review's check from these files.
+const TRACES_FOLDER = "traces";
+// The account policy setup activates; v1 stays for records sealed under it.
+const POLICY_FILE = "claims-review-v2.json";
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const sha256Hex = (data) => createHash("sha256").update(data).digest("hex");
@@ -102,7 +116,7 @@ const clientFor = (key) =>
 // ── setup ──────────────────────────────────────────────────────────────────
 
 async function cmdSetup() {
-  if (existsSync("demo-keys.json")) fail("demo-keys.json exists here; setup runs once per account and folder");
+  if (existsSync("demo-keys.json")) fail("demo-keys.json exists here; this folder is already set up, and every program in this repository uses it");
   const ownerSecret = process.env.VERDIFAX_OWNER_KEY || "";
   if (!ownerSecret) fail("set VERDIFAX_OWNER_KEY to the account's owner key");
   const ownerSigner = generateRequestKeyPair();
@@ -112,7 +126,7 @@ async function cmdSetup() {
   const memberSigner = generateRequestKeyPair();
   const agent = new VerdifaxClient({ baseURL: baseURL(), apiKey: member.secret, signingKey: memberSigner.privateKey });
   await agent.registerRequestKey();
-  const policyText = readFileSync(join(REPO, "policy", "claims-review-v1.json"), "utf8");
+  const policyText = readFileSync(join(REPO, "policy", POLICY_FILE), "utf8");
   const uploaded = await owner.uploadAccountPolicy(policyText);
   await owner.activateAccountPolicy(uploaded.document_hash);
   const approver = generateRequestKeyPair();
@@ -225,7 +239,7 @@ async function cmdReview(draftPath, model, answersPath) {
     // The account policy refused the draft at intake (for example a
     // confidential draft), so it never reached a model. The refusal is
     // sealed as a receipt; nothing else runs for this draft.
-    await refuse(agent, jobId, "intake", {}, { intake: intakePayload }, draftPath, draftHash, err);
+    await stop(agent, jobId, "intake", {}, { intake: intakePayload }, {}, draftPath, draftHash, err, model, { input: 0, output: 0 }, new Set(), {});
     return;
   }
   payloads.intake = intakePayload;
@@ -234,6 +248,11 @@ async function cmdReview(draftPath, model, answersPath) {
   const results = [];
   const tokens = { input: 0, output: 0 };
   const models = new Set();
+  // The model's exact answer, the text Verdifax's AI review reads, kept as
+  // sent so a reader recomputes the sealed ai_output_hash from the file.
+  const answerTexts = {};
+  // The text the server's AI review checked, returned once with each step.
+  const traceTexts = {};
   for (const rule of rules) {
     const userText = `Rule ${rule.id}: ${rule.text}\n\nDraft:\n${draft}`;
     const promptHash = sha256Hex(prompt + "\n" + userText);
@@ -241,6 +260,7 @@ async function cmdReview(draftPath, model, answersPath) {
     tokens.input += answer.inputTokens;
     tokens.output += answer.outputTokens;
     models.add(answer.model);
+    answerTexts[rule.id] = answer.raw || answer.reason;
     const payload = {
       form: FORM, step: rule.id, rule_id: rule.id, rule_text: rule.text, draft_sha256: draftHash, rule_set_hash: ruleSetHash,
       model: answer.model, model_response_id: answer.responseId, prompt_hash: promptHash, verdict: answer.verdict, reason: answer.reason,
@@ -249,7 +269,7 @@ async function cmdReview(draftPath, model, answersPath) {
     try {
       receipt = await job.step(rule.id, {
         after: ["intake"], payload_text: canonical(payload), program_id: PROGRAM_ID, route_id: ROUTE_RULE,
-        registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answer.raw || answer.reason,
+        registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answerTexts[rule.id],
         attested_context: {
           attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: answer.model, prompt_hash: promptHash,
           decision_kind: "claims.rule_check", decision_result: answer.verdict,
@@ -263,9 +283,11 @@ async function cmdReview(draftPath, model, answersPath) {
       // stop is sealed as a receipt, the steps already sealed are kept
       // beside it, and a person sees the stop. The job never gets a verdict.
       payloads[rule.id] = payload;
-      await refuse(agent, jobId, rule.id, runIds, payloads, draftPath, draftHash, err);
+      if (err.aivpTraceText) traceTexts[rule.id] = err.aivpTraceText;
+      await stop(agent, jobId, rule.id, runIds, payloads, answerTexts, draftPath, draftHash, err, model, tokens, models, traceTexts);
       return;
     }
+    if (receipt.aivp_trace_text) traceTexts[rule.id] = receipt.aivp_trace_text;
     payloads[rule.id] = payload;
     runIds[rule.id] = receipt.run_id;
     results.push({ rule_id: rule.id, verdict: answer.verdict, reason: answer.reason });
@@ -287,6 +309,8 @@ async function cmdReview(draftPath, model, answersPath) {
   runIds.verdict = final.run_id;
 
   await saveJobRecords(agent, jobId, out, runIds, payloads);
+  saveAnswers(out, answerTexts);
+  saveTexts(join(out, TRACES_FOLDER), traceTexts);
   const cost = models.size === 1 && models.has(model) ? measuredCost(model, tokens.input, tokens.output) : null;
   const summary = {
     job_id: jobId, draft: draftPath, draft_sha256: draftHash, rule_set_hash: ruleSetHash, verdict: verdictPayload.verdict,
@@ -346,21 +370,46 @@ async function stoppedRun(agent, jobId, step, err) {
 // before it, the exact payload bytes of every step including the stopped
 // one, and a summary naming the step and the kind of stop. The same for
 // intake and for any later step.
-async function refuse(agent, jobId, step, runIds, payloads, draftPath, draftHash, err) {
+// The model's exact answers, one file per step, so each sealed
+// ai_output_hash recomputes from its file.
+// Writes each step's text to <folder>/<step>.txt, byte for byte.
+function saveTexts(folder, texts) {
+  if (Object.keys(texts).length === 0) return;
+  mkdirSync(folder, { recursive: true });
+  for (const [step, text] of Object.entries(texts)) writeFileSync(join(folder, `${step}.txt`), Buffer.from(text, "utf8"));
+}
+
+function saveAnswers(folder, answerTexts) {
+  mkdirSync(join(folder, ANSWERS_FOLDER), { recursive: true });
+  for (const [step, text] of Object.entries(answerTexts)) writeFileSync(join(folder, ANSWERS_FOLDER, `${step}.txt`), Buffer.from(text, "utf8"));
+}
+
+// The folder of the stopped step whose receipt is run runId.
+function stoppedFolder(runId) {
+  return join("records", `${STOPPED_FOLDER_PREFIX}${runId}`);
+}
+
+async function stop(agent, jobId, step, runIds, payloads, answerTexts, draftPath, draftHash, err, model, tokens, models, traceTexts) {
   const row = await stoppedRun(agent, jobId, step, err);
-  const refused = row.run_id;
-  const folder = join("records", `refused-${refused}`); // named by the run, so two refusals never share a folder
-  writeJSON(join(folder, "receipt.json"), await stopReceipt(agent, row.status, refused));
+  const stopped = row.run_id;
+  const folder = stoppedFolder(stopped); // named by the run, so two stops never share a folder
+  writeJSON(join(folder, "receipt.json"), await stopReceipt(agent, row.status, stopped));
   mkdirSync(join(folder, "steps"), { recursive: true });
   for (const [sealedStep, runId] of Object.entries(runIds)) writeFileSync(join(folder, "steps", `${sealedStep}.json`), await agent.getRunArtifacts(runId));
   mkdirSync(join(folder, "payloads"), { recursive: true });
   for (const [name, payload] of Object.entries(payloads)) writeFileSync(join(folder, "payloads", `${name}.json`), canonical(payload));
+  saveAnswers(folder, answerTexts);
+  saveTexts(join(folder, TRACES_FOLDER), traceTexts);
+  const cost = models.size === 1 && models.has(model) ? measuredCost(model, tokens.input, tokens.output) : null;
   writeJSON(join(folder, "job.json"), {
-    refused_run_id: refused, step, stop_status: row.status, job_id: jobId, draft: draftPath, draft_sha256: draftHash,
-    reason: err.message, run_ids: runIds,
+    stopped_run_id: stopped, step, stop_status: row.status, job_id: jobId, draft: draftPath, draft_sha256: draftHash,
+    reason: err.message, run_ids: runIds, models: [...models].sort(), measured_tokens: tokens, measured_cost_usd: cost,
   });
-  console.log(`refused at ${step} by ${STOP_KINDS[row.status]}: run ${refused}, ${err.message}`);
+  console.log(`stopped at ${step} by ${STOP_KINDS[row.status]}: run ${stopped}, ${err.message}`);
   console.log(`records in ${folder}`);
+  if (cost !== null) {
+    console.log(`measured model use before the stop: ${tokens.input} input and ${tokens.output} output tokens, about $${cost.toFixed(2)} at published prices`);
+  }
 }
 
 async function saveJobRecords(agent, jobId, out, runIds, payloads) {
@@ -400,11 +449,7 @@ async function cmdSignOff(jobId, decision, note, receiptRunId) {
   if (receiptRunId) {
     runId = Number(receiptRunId);
     target = { kind: "receipt", run_id: runId, digest: await stopReceiptHash(agent, runId) };
-    folder = existsSync("records")
-      ? readdirSync("records").filter((p) => p.startsWith("refused-")).map((p) => join("records", p))
-          .find((p) => existsSync(join(p, "job.json")) && JSON.parse(readFileSync(join(p, "job.json"), "utf8")).refused_run_id === runId)
-      : undefined;
-    folder = folder || join("records", `receipt-${runId}`);
+    folder = stoppedFolder(runId);
   } else {
     folder = join("records", jobId);
     const summary = JSON.parse(readFileSync(join(folder, "job.json"), "utf8"));
@@ -429,14 +474,14 @@ async function cmdSignOff(jobId, decision, note, receiptRunId) {
 // and placed in the account's feed, which `feed` then reads.
 
 // The folder and the records a publish or unpublish acts on: every step of
-// a job, or one refusal's receipt.
+// a job, or a stopped step's receipt with every step the job sealed before
+// it, so a reader sees what the job did before it stopped.
 function publicationTargets(jobId, receipt) {
   if (receipt) {
     const runId = Number(receipt);
-    const folder = (existsSync("records") ? readdirSync("records").filter((p) => p.startsWith("refused-")).map((p) => join("records", p)) : [])
-      .find((p) => existsSync(join(p, "job.json")) && JSON.parse(readFileSync(join(p, "job.json"), "utf8")).refused_run_id === runId)
-      || join("records", `receipt-${runId}`);
-    return { folder, targets: { receipt: runId } };
+    const folder = stoppedFolder(runId);
+    const summary = JSON.parse(readFileSync(join(folder, "job.json"), "utf8"));
+    return { folder, targets: { ...summary.run_ids, receipt: runId } };
   }
   const folder = join("records", jobId);
   const summary = JSON.parse(readFileSync(join(folder, "job.json"), "utf8"));
@@ -447,15 +492,20 @@ async function publication(jobId, receipt, publish) {
   const keys = loadKeys();
   const owner = clientFor(keys.owner);
   const { folder, targets } = publicationTargets(jobId, receipt);
+  // A repeated publish changes nothing and the server answers with no new
+  // publication, so the sealed publication saved earlier is kept.
+  const earlier = existsSync(join(folder, "published.json")) ? JSON.parse(readFileSync(join(folder, "published.json"), "utf8")) : {};
   const published = {};
   for (const name of Object.keys(targets).sort()) {
     const runId = targets[name];
     const answer = publish ? await owner.publishRun(runId) : await owner.unpublishRun(runId);
     // A completed run is served at its bundle address, a stopped run at its
     // receipt address (R156); each answer names only the one it has.
+    let sealed = answer.publication;
+    if (sealed === null && earlier[name]?.run_id === runId && earlier[name]?.public === answer.public) sealed = earlier[name].publication ?? null;
     published[name] = {
       run_id: runId, public: answer.public, public_bundle_url: answer.public_bundle_url ?? null,
-      public_receipt_url: answer.public_receipt_url ?? null, verify_url: answer.verify_url, publication: answer.publication,
+      public_receipt_url: answer.public_receipt_url ?? null, verify_url: answer.verify_url, publication: sealed,
     };
   }
   writeJSON(join(folder, "published.json"), published);
@@ -490,8 +540,9 @@ async function cmdFeed() {
 function printVerifyCommands(jobId) {
   const folder = join("records", jobId);
   console.log(`verify with verdifax-verify ${MIN_VERIFIER} or later:`);
-  console.log(`  verdifax-verify --job ${join(folder, "steps")}`);
-  console.log(`  verdifax-verify --account-policy ${join(REPO, "policy", "claims-review-v1.json")} ${join(folder, "steps", "verdict.json")}`);
+  const traces = existsSync(join(folder, TRACES_FOLDER)) ? ` --aivp-traces ${join(folder, TRACES_FOLDER)}` : "";
+  console.log(`  verdifax-verify --job ${join(folder, "steps")}${traces}`);
+  console.log(`  verdifax-verify --account-policy ${join(REPO, "policy", POLICY_FILE)} ${join(folder, "steps", "verdict.json")}`);
   if (existsSync(join(folder, "signoffs.json"))) {
     console.log(`  verdifax-verify --signoff ${join(folder, "signoffs.json")} --approver-key approver.txt ${join(folder, "steps", "verdict.json")}`);
   }
@@ -543,13 +594,16 @@ async function main() {
       if (args.length !== 1) fail("verify-commands takes a JOB_ID");
       return printVerifyCommands(args[0]);
     default:
-      fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, feed, verify-commands JOB_ID");
+      fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, feed, verify-commands JOB_ID");
   }
 }
 
 export { canonical, draftClassification, loadRules, RULE_SET, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun };
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Node loads the program by its real path, so the path it was started with is
+// compared as a real path too: through a linked folder (macOS's /tmp is one)
+// the two spellings differ, and the program would otherwise do nothing (R165).
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url))) {
   main().catch((err) => {
     console.error("claims-review:", err instanceof Error ? err.message : err);
     process.exit(1);

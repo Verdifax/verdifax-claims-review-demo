@@ -9,13 +9,18 @@
 # cannot show the declared facts are true. A sign-off shows a registered
 # approver key signed that decision; it does not show who holds the key or
 # that the review was careful.
+# A decision means the same on every result: approve agrees with
+# the result signed, a verdict or the stop a receipt records, and reject
+# judges it wrong. A sign-off releases or blocks nothing on its own.
 #
 # Commands (the same in every language of this repository):
 #
 #   claims-review setup                              owner key in VERDIFAX_OWNER_KEY
 #   claims-review review DRAFT.md [--model ID]        model key in ANTHROPIC_API_KEY
 #   claims-review sign-off JOB_ID approve|reject [--note TEXT]
-#   claims-review sign-off --receipt RUN_ID reject
+#   claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT]
+#   claims-review publish JOB_ID | publish --receipt RUN_ID
+#   claims-review unpublish JOB_ID | unpublish --receipt RUN_ID
 #   claims-review feed
 #   claims-review verify-commands JOB_ID
 #
@@ -39,7 +44,16 @@ ROUTE_RULE <- "claims-review/v1/rule-check"
 ROUTE_VERDICT <- "claims-review/v1/verdict"
 OBJECT_PREFIX <- "claims-review/v1/"
 LEVELS <- c("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
-MIN_VERIFIER <- "v0.24.0"
+MIN_VERIFIER <- "v0.27.0"
+# A stopped step's records live in records/stopped-<run_id>/, and the
+# model's exact answers in answers/ beside each job's steps/.
+STOPPED_FOLDER_PREFIX <- "stopped-"
+ANSWERS_FOLDER <- "answers"
+# The text the server's AI review checked for each step, as the server
+# returned it once: a reader re-runs the review's check from these files.
+TRACES_FOLDER <- "traces"
+# The account policy setup activates; v1 stays for records sealed under it.
+POLICY_FILE <- "claims-review-v2.json"
 
 script_dir <- function() {
   args <- commandArgs(trailingOnly = FALSE)
@@ -123,7 +137,7 @@ client_for <- function(key) verdifax_client(base_url = base_url(), api_key = key
 # ── setup ──────────────────────────────────────────────────────────────────
 
 cmd_setup <- function() {
-  if (file.exists("demo-keys.json")) fail("demo-keys.json exists here; setup runs once per account and folder")
+  if (file.exists("demo-keys.json")) fail("demo-keys.json exists here; this folder is already set up, and every program in this repository uses it")
   owner_secret <- Sys.getenv("VERDIFAX_OWNER_KEY", "")
   if (owner_secret == "") fail("set VERDIFAX_OWNER_KEY to the account's owner key")
   owner_signer <- verdifax_generate_request_key()
@@ -133,7 +147,7 @@ cmd_setup <- function() {
   member_signer <- verdifax_generate_request_key()
   agent <- verdifax_client(base_url = base_url(), api_key = member$secret, signing_key = member_signer$private_key)
   verdifax_register_request_key(agent)
-  policy_text <- read_text(file.path(REPO, "policy", "claims-review-v1.json"))
+  policy_text <- read_text(file.path(REPO, "policy", POLICY_FILE))
   uploaded <- verdifax_upload_account_policy(owner, policy_text)
   verdifax_activate_account_policy(owner, uploaded$document_hash)
   approver <- verdifax_generate_request_key()
@@ -236,7 +250,8 @@ cmd_review <- function(draft_path, model, answers_path) {
     # The account policy refused the draft at intake (for example a
     # confidential draft), so it never reached a model. The refusal is
     # sealed as a receipt; nothing else runs for this draft.
-    refuse(agent, job_id, "intake", empty_object(), list(intake = intake_payload), draft_path, draft_hash, intake)
+    stop_job(agent, job_id, "intake", empty_object(), list(intake = intake_payload), list(), draft_path, draft_hash, intake,
+             model, list(input = 0L, output = 0L), character(0), list())
     return(invisible(NULL))
   }
   payloads$intake <- intake_payload
@@ -245,6 +260,11 @@ cmd_review <- function(draft_path, model, answers_path) {
   results <- list()
   tokens <- list(input = 0L, output = 0L)
   models <- character(0)
+  # The model's exact answer, the text Verdifax's AI review reads, kept as
+  # sent so a reader recomputes the sealed ai_output_hash from the file.
+  answer_texts <- list()
+  # The text the server's AI review checked, returned once with each step.
+  trace_texts <- list()
   for (rule in rules) {
     user_text <- sprintf("Rule %s: %s\n\nDraft:\n%s", rule$id, rule$text, draft)
     prompt_hash <- sha256_hex(paste0(prompt, "\n", user_text))
@@ -256,6 +276,7 @@ cmd_review <- function(draft_path, model, answers_path) {
                     rule_set_hash = rule_set_hash, model = answer$model, model_response_id = answer$response_id,
                     prompt_hash = prompt_hash, verdict = answer$verdict, reason = answer$reason)
     ai_text <- if (nzchar(answer$raw)) answer$raw else answer$reason
+    answer_texts[[rule$id]] <- ai_text
     receipt <- tryCatch(
       verdifax_job_step(job, rule$id, after = list("intake"), payload = canonical(payload), program_id = PROGRAM_ID,
                         route_id = ROUTE_RULE, registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = ai_text,
@@ -270,9 +291,12 @@ cmd_review <- function(draft_path, model, answers_path) {
       # stop is sealed as a receipt, the steps already sealed are kept
       # beside it, and a person sees the stop. The job never gets a verdict.
       payloads[[rule$id]] <- payload
-      refuse(agent, job_id, rule$id, run_ids, payloads, draft_path, draft_hash, receipt)
+      if (!is.null(receipt$aivp_trace_text)) trace_texts[[rule$id]] <- receipt$aivp_trace_text
+      stop_job(agent, job_id, rule$id, run_ids, payloads, answer_texts, draft_path, draft_hash, receipt, model, tokens, models,
+               trace_texts)
       return(invisible(NULL))
     }
+    if (!is.null(receipt$aivp_trace_text)) trace_texts[[rule$id]] <- receipt$aivp_trace_text
     payloads[[rule$id]] <- payload
     run_ids[[rule$id]] <- receipt$run_id
     results[[length(results) + 1]] <- list(rule_id = rule$id, verdict = answer$verdict, reason = answer$reason)
@@ -294,6 +318,8 @@ cmd_review <- function(draft_path, model, answers_path) {
   run_ids$verdict <- final$run_id
 
   save_job_records(agent, job_id, out, run_ids, payloads)
+  save_answers(out, answer_texts)
+  save_texts(file.path(out, TRACES_FOLDER), trace_texts)
   cost <- if (length(models) == 1 && models == model) measured_cost(model, tokens$input, tokens$output) else NULL
   summary <- list(job_id = job_id, draft = draft_path, draft_sha256 = draft_hash, rule_set_hash = rule_set_hash,
                   verdict = verdict, failed_rules = as_list(failed), models = as_list(sort(models)),
@@ -359,24 +385,48 @@ error_reason <- function(e) if (length(e$body) > 0) paste(e$body, collapse = " "
 # An empty JSON object ({}), as the other programs write an empty run_ids.
 empty_object <- function() structure(list(), names = character(0))
 
+# The model's exact answers, one file per step, so each sealed
+# ai_output_hash recomputes from its file.
+# Writes each step's text to <folder>/<step>.txt, byte for byte.
+save_texts <- function(folder, texts) {
+  for (step in names(texts)) write_text(file.path(folder, paste0(step, ".txt")), texts[[step]])
+}
+
+save_answers <- function(folder, answer_texts) {
+  for (step in names(answer_texts)) write_text(file.path(folder, ANSWERS_FOLDER, paste0(step, ".txt")), answer_texts[[step]])
+}
+
+# The folder of the stopped step whose receipt is run run_id.
+stopped_folder <- function(run_id) file.path("records", paste0(STOPPED_FOLDER_PREFIX, run_id))
+
 # Record a stopped step: its sealed receipt, every record the job sealed
-# before it, the exact payload bytes of every step including the stopped
-# one, and a summary naming the step and the kind of stop. The same for
-# intake and for any later step.
-refuse <- function(agent, job_id, step, run_ids, payloads, draft_path, draft_hash, e) {
+# before it, the exact payload bytes and model answers of every step
+# including the stopped one, the model use spent before the stop, and a
+# summary naming the step and the kind of stop. The same for intake and for
+# any later step.
+stop_job <- function(agent, job_id, step, run_ids, payloads, answer_texts, draft_path, draft_hash, e, model, tokens, models,
+                     trace_texts) {
   row <- stopped_run(agent, job_id, step, e)
-  refused <- row$run_id
+  stopped <- row$run_id
   reason <- error_reason(e)
-  folder <- file.path("records", paste0("refused-", refused))  # named by the run, so two refusals never share a folder
-  write_json(file.path(folder, "receipt.json"), stop_receipt(agent, row$status, refused))
+  folder <- stopped_folder(stopped)  # named by the run, so two stops never share a folder
+  write_json(file.path(folder, "receipt.json"), stop_receipt(agent, row$status, stopped))
   for (sealed_step in names(run_ids)) {
     write_text(file.path(folder, "steps", paste0(sealed_step, ".json")), verdifax_get_run_artifacts(agent, run_ids[[sealed_step]]))
   }
   for (name in names(payloads)) write_text(file.path(folder, "payloads", paste0(name, ".json")), canonical(payloads[[name]]))
-  write_json(file.path(folder, "job.json"), list(refused_run_id = refused, step = step, stop_status = row$status, job_id = job_id,
-                                                 draft = draft_path, draft_sha256 = draft_hash, reason = reason, run_ids = run_ids))
-  cat(sprintf("refused at %s by %s: run %d, %s\n", step, STOP_KINDS[[row$status]], refused, reason))
+  save_answers(folder, answer_texts)
+  save_texts(file.path(folder, TRACES_FOLDER), trace_texts)
+  cost <- if (length(models) == 1 && models == model) measured_cost(model, tokens$input, tokens$output) else NULL
+  write_json(file.path(folder, "job.json"), list(stopped_run_id = stopped, step = step, stop_status = row$status, job_id = job_id,
+                                                 draft = draft_path, draft_sha256 = draft_hash, reason = reason, run_ids = run_ids,
+                                                 models = as_list(sort(models)), measured_tokens = tokens, measured_cost_usd = cost))
+  cat(sprintf("stopped at %s by %s: run %d, %s\n", step, STOP_KINDS[[row$status]], stopped, reason))
   cat(sprintf("records in %s\n", folder))
+  if (!is.null(cost)) {
+    cat(sprintf("measured model use before the stop: %d input and %d output tokens, about $%.2f at published prices\n",
+                as.integer(tokens$input), as.integer(tokens$output), cost))
+  }
 }
 
 save_job_records <- function(agent, job_id, out, run_ids, payloads) {
@@ -415,10 +465,7 @@ cmd_sign_off <- function(job_id, decision, note, receipt_run_id) {
   if (!is.null(receipt_run_id)) {
     run_id <- as.integer(receipt_run_id)
     target <- list(kind = "receipt", run_id = run_id, digest = stop_receipt_hash(agent, run_id))
-    folders <- Filter(function(p) file.exists(file.path(p, "job.json")) &&
-                        identical(as.integer(jsonlite::fromJSON(file.path(p, "job.json"))$refused_run_id), run_id),
-                      list.files("records", pattern = "^refused-", full.names = TRUE))
-    folder <- if (length(folders) > 0) folders[1] else file.path("records", paste0("receipt-", run_id))
+    folder <- stopped_folder(run_id)
     record_file <- "receipt.json"
   } else {
     folder <- file.path("records", job_id)
@@ -444,15 +491,16 @@ cmd_sign_off <- function(job_id, decision, note, receipt_run_id) {
 # and placed in the account's feed, which `feed` then reads.
 
 # The folder and the records a publish or unpublish acts on: every step of a
-# job, or one refusal's receipt.
+# job, or a stopped step's receipt with every step the job sealed before it,
+# so a reader sees what the job did before it stopped.
 publication_targets <- function(job_id, receipt) {
   if (!is.null(receipt)) {
     run_id <- as.integer(receipt)
-    folders <- Filter(function(p) file.exists(file.path(p, "job.json")) &&
-                        identical(as.integer(jsonlite::fromJSON(file.path(p, "job.json"))$refused_run_id), run_id),
-                      list.files("records", pattern = "^refused-", full.names = TRUE))
-    folder <- if (length(folders) > 0) folders[1] else file.path("records", paste0("receipt-", run_id))
-    return(list(folder = folder, targets = list(receipt = run_id)))
+    folder <- stopped_folder(run_id)
+    summary <- jsonlite::fromJSON(file.path(folder, "job.json"), simplifyVector = FALSE)
+    targets <- summary$run_ids
+    targets$receipt <- run_id
+    return(list(folder = folder, targets = targets))
   }
   folder <- file.path("records", job_id)
   summary <- jsonlite::fromJSON(file.path(folder, "job.json"), simplifyVector = FALSE)
@@ -463,15 +511,24 @@ cmd_publication <- function(job_id, receipt, publish) {
   keys <- load_keys()
   owner <- client_for(keys$owner)
   where <- publication_targets(job_id, receipt)
+  # A repeated publish changes nothing and the server answers with no new
+  # publication, so the sealed publication saved earlier is kept.
+  earlier_path <- file.path(where$folder, "published.json")
+  earlier <- if (file.exists(earlier_path)) jsonlite::fromJSON(earlier_path, simplifyVector = FALSE) else list()
   published <- list()
   for (name in sort(names(where$targets))) {
     run_id <- as.integer(where$targets[[name]])
     answer <- if (publish) verdifax_publish_run(owner, run_id) else verdifax_unpublish_run(owner, run_id)
     # A completed run is served at its bundle address, a stopped run at its
     # receipt address (R156); each answer names only the one it has.
+    sealed <- answer$publication
+    before <- earlier[[name]]
+    if (is.null(sealed) && !is.null(before) && identical(as.integer(before$run_id), run_id) && identical(before$public, answer$public)) {
+      sealed <- before$publication
+    }
     published[[name]] <- list(run_id = run_id, public = answer$public, public_bundle_url = answer$public_bundle_url,
                               public_receipt_url = answer$public_receipt_url,
-                              verify_url = answer$verify_url, publication = answer$publication)
+                              verify_url = answer$verify_url, publication = sealed)
   }
   write_json(file.path(where$folder, "published.json"), published)
   cat(sprintf("%s %d record(s) in %s\n", if (publish) "published" else "withdrawn", length(published), where$folder))
@@ -504,8 +561,9 @@ cmd_feed <- function() {
 print_verify_commands <- function(job_id) {
   folder <- file.path("records", job_id)
   cat(sprintf("verify with verdifax-verify %s or later:\n", MIN_VERIFIER))
-  cat(sprintf("  verdifax-verify --job %s\n", file.path(folder, "steps")))
-  cat(sprintf("  verdifax-verify --account-policy %s %s\n", file.path(REPO, "policy", "claims-review-v1.json"), file.path(folder, "steps", "verdict.json")))
+  traces <- if (dir.exists(file.path(folder, TRACES_FOLDER))) paste0(" --aivp-traces ", file.path(folder, TRACES_FOLDER)) else ""
+  cat(sprintf("  verdifax-verify --job %s%s\n", file.path(folder, "steps"), traces))
+  cat(sprintf("  verdifax-verify --account-policy %s %s\n", file.path(REPO, "policy", POLICY_FILE), file.path(folder, "steps", "verdict.json")))
   if (file.exists(file.path(folder, "signoffs.json"))) {
     cat(sprintf("  verdifax-verify --signoff %s --approver-key approver.txt %s\n", file.path(folder, "signoffs.json"), file.path(folder, "steps", "verdict.json")))
   }
@@ -523,7 +581,7 @@ take_option <- function(args, name) {
 
 main <- function() {
   args <- commandArgs(trailingOnly = TRUE)
-  if (length(args) == 0) fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, feed, verify-commands JOB_ID")
+  if (length(args) == 0) fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, feed, verify-commands JOB_ID")
   command <- args[1]
   args <- args[-1]
   if (command == "setup") return(cmd_setup())
@@ -554,7 +612,7 @@ main <- function() {
     if (length(args) != 1) fail("verify-commands takes a JOB_ID")
     return(print_verify_commands(args[1]))
   }
-  fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, feed, verify-commands JOB_ID")
+  fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, feed, verify-commands JOB_ID")
 }
 
 if (!nzchar(Sys.getenv("CLAIMS_REVIEW_NO_MAIN"))) main()

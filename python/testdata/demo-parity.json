@@ -211,6 +211,7 @@
     "run_id",
     "public",
     "public_bundle_url",
+    "public_receipt_url",
     "verify_url",
     "publication"
   ]

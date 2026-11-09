@@ -467,7 +467,10 @@ cmd_publication <- function(job_id, receipt, publish) {
   for (name in sort(names(where$targets))) {
     run_id <- as.integer(where$targets[[name]])
     answer <- if (publish) verdifax_publish_run(owner, run_id) else verdifax_unpublish_run(owner, run_id)
+    # A completed run is served at its bundle address, a stopped run at its
+    # receipt address (R156); each answer names only the one it has.
     published[[name]] <- list(run_id = run_id, public = answer$public, public_bundle_url = answer$public_bundle_url,
+                              public_receipt_url = answer$public_receipt_url,
                               verify_url = answer$verify_url, publication = answer$publication)
   }
   write_json(file.path(where$folder, "published.json"), published)

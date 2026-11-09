@@ -723,12 +723,17 @@ func cmdPublication(ctx context.Context, jobID, receipt string, publish bool) {
 			answer, callErr = owner.UnpublishRun(ctx, runID)
 		}
 		must(callErr)
-		var link any
+		// A completed run is served at its bundle address, a stopped run at
+		// its receipt address (R156); each answer names only the one it has.
+		var bundleLink, receiptLink any // any: a JSON null when the answer names no such address
 		if answer.PublicBundleURL != "" {
-			link = answer.PublicBundleURL
+			bundleLink = answer.PublicBundleURL
 		}
-		published[name] = map[string]any{"run_id": runID, "public": answer.Public, "public_bundle_url": link,
-			"verify_url": answer.VerifyURL, "publication": answer.Publication}
+		if answer.PublicReceiptURL != "" {
+			receiptLink = answer.PublicReceiptURL
+		}
+		published[name] = map[string]any{"run_id": runID, "public": answer.Public, "public_bundle_url": bundleLink,
+			"public_receipt_url": receiptLink, "verify_url": answer.VerifyURL, "publication": answer.Publication}
 		if name == "verdict" || name == "receipt" || shown == nil {
 			shown = answer
 		}

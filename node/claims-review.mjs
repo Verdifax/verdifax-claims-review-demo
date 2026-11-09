@@ -451,7 +451,12 @@ async function publication(jobId, receipt, publish) {
   for (const name of Object.keys(targets).sort()) {
     const runId = targets[name];
     const answer = publish ? await owner.publishRun(runId) : await owner.unpublishRun(runId);
-    published[name] = { run_id: runId, public: answer.public, public_bundle_url: answer.public_bundle_url ?? null, verify_url: answer.verify_url, publication: answer.publication };
+    // A completed run is served at its bundle address, a stopped run at its
+    // receipt address (R156); each answer names only the one it has.
+    published[name] = {
+      run_id: runId, public: answer.public, public_bundle_url: answer.public_bundle_url ?? null,
+      public_receipt_url: answer.public_receipt_url ?? null, verify_url: answer.verify_url, publication: answer.publication,
+    };
   }
   writeJSON(join(folder, "published.json"), published);
   console.log(`${publish ? "published" : "withdrawn"} ${Object.keys(published).length} record(s) in ${folder}`);

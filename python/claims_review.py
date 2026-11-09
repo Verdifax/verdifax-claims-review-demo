@@ -440,7 +440,10 @@ def publication(args: argparse.Namespace, publish: bool) -> None:
     for name in sorted(targets):
         run_id = targets[name]
         answer = owner.publish_run(run_id) if publish else owner.unpublish_run(run_id)
+        # A completed run is served at its bundle address, a stopped run at
+        # its receipt address (R156); each answer names only the one it has.
         published[name] = {"run_id": run_id, "public": answer["public"], "public_bundle_url": answer.get("public_bundle_url"),
+                           "public_receipt_url": answer.get("public_receipt_url"),
                            "verify_url": answer["verify_url"], "publication": answer["publication"]}
     write_json(folder / "published.json", published)
     print("%s %d record(s) in %s" % ("published" if publish else "withdrawn", len(published), folder))

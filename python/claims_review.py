@@ -44,7 +44,7 @@ from verdifax.exceptions import APIError
 DEFAULT_BASE_URL = "https://api.verdifax.com"
 DEFAULT_MODEL = "claude-fable-5-1"
 FORM = "verdifax.claims-review.v1"
-RULE_SET = "v1"
+RULE_SET = "v2"
 ACTOR_ID = "claims-review-agent"
 ROUTE_INTAKE = "claims-review/v1/intake"
 ROUTE_RULE = "claims-review/v1/rule-check"
@@ -71,7 +71,7 @@ REGISTRY_RECORD_HASH = sha256_hex(b"verdifax-claims-review-demo/registry/v1")
 
 
 def load_rules() -> tuple[list[dict[str, str]], str]:
-    doc = json.loads((REPO / "rules" / "v1.json").read_text(encoding="utf-8"))
+    doc = json.loads((REPO / "rules" / (RULE_SET + ".json")).read_text(encoding="utf-8"))
     return doc["rules"], sha256_hex(canonical(doc).encode("utf-8"))
 
 
@@ -234,7 +234,7 @@ def cmd_review(args: argparse.Namespace) -> None:
         # The account policy refused the draft at intake (for example a
         # confidential draft), so it never reached a model. The refusal is
         # sealed as a receipt; nothing else runs for this draft.
-        refuse(agent, job_id, "intake", {}, {"intake": intake_payload}, str(draft_path), draft_hash, exc.message)
+        refuse(agent, job_id, "intake", {}, {"intake": intake_payload}, str(draft_path), draft_hash, exc)
         return
     payloads["intake"] = intake_payload
     run_ids = {"intake": intake.run_id}
@@ -260,12 +260,13 @@ def cmd_review(args: argparse.Namespace) -> None:
                                                                          decision_kind="claims.rule_check", decision_result=answer["verdict"]),
                                policy_context={"object_type": "text", "object_id": OBJECT_PREFIX + rule["id"], "classification": level})
         except APIError as exc:
-            # The account policy or the server's content screen refused this
-            # step, so the job stops here: the refusal is sealed as a receipt,
-            # the steps already sealed are kept beside it, and a person sees
-            # the stop. The job never gets a verdict.
+            # The account policy, the server's content screen or its review
+            # of the model's answer stopped this step, so the job stops here:
+            # the stop is sealed as a receipt, the steps already sealed are
+            # kept beside it, and a person sees the stop. The job never gets
+            # a verdict.
             payloads[rule["id"]] = payload
-            refuse(agent, job_id, rule["id"], run_ids, payloads, str(draft_path), draft_hash, exc.message)
+            refuse(agent, job_id, rule["id"], run_ids, payloads, str(draft_path), draft_hash, exc)
             return
         payloads[rule["id"]] = payload
         run_ids[rule["id"]] = receipt.run_id
@@ -296,31 +297,64 @@ def cmd_review(args: argparse.Namespace) -> None:
     print_verify_commands(job_id)
 
 
-def newest_refusal(agent: verdifax.VerdifaxClient) -> int:
-    rows = [r for r in agent.export_runs().runs if r.status == "pepg_deny"]
+# A step the server stopped is sealed as one run whose status names the kind
+# of stop, with a receipt of that kind (R152). Any other error is not a stop:
+# the program reports it as the server gave it and seals nothing for it.
+STOP_KINDS = {
+    "pepg_deny": "the account policy or the content screen",
+    "aivp_t4_halt": "the server's review of the model's answer",
+    "ccv_halt": "the per-run budget",
+    "macc_halt": "the cumulative budget",
+    "attestation_gap": "the policy's required attested fields",
+}
+STOP_RECEIPT_FIELDS = {"pepg_deny": "deny_receipt", "aivp_t4_halt": "aivp_t4_halt_receipt", "ccv_halt": "ccv_halt_receipt",
+                       "macc_halt": "macc_halt_receipt", "attestation_gap": "attestation_gap_receipt"}
+
+
+def stop_receipt(agent: verdifax.VerdifaxClient, status: str, run_id: int) -> dict[str, Any]:
+    fetch = {"pepg_deny": agent.get_deny_receipt, "aivp_t4_halt": agent.get_aivp_t4_halt_receipt,
+             "ccv_halt": agent.get_ccv_halt_receipt, "macc_halt": agent.get_macc_halt_receipt,
+             "attestation_gap": agent.get_attestation_gap_receipt}[status]
+    return fetch(run_id)
+
+
+def stop_receipt_hash(agent: verdifax.VerdifaxClient, run_id: int) -> str:
+    """The sealed hash of a stopped run's receipt, whatever kind of stop it was."""
+    status = agent.get_run(run_id).status
+    if status not in STOP_KINDS:
+        fail("run %d is %s, not a stopped run with a receipt" % (run_id, status))
+    return stop_receipt(agent, status, run_id)[STOP_RECEIPT_FIELDS[status]]["hash"]
+
+
+def stopped_run(agent: verdifax.VerdifaxClient, job_id: str, step: str, exc: APIError) -> Any:
+    """The run the server sealed for this job's stopped step, found by its job
+    and step, never by being the newest of the key."""
+    rows = [r for r in agent.export_runs(job_id=job_id).runs if r.step_id == step and r.status in STOP_KINDS]
     if not rows:
-        fail("the step was refused but no refused run is listed for this key")
-    return max(r.run_id for r in rows)
+        fail("the server answered HTTP %d at %s: %s; it recorded no stop for this step, so nothing was sealed as one"
+             % (exc.status_code, step, exc.message))
+    return max(rows, key=lambda r: r.run_id)
 
 
 def refuse(agent: verdifax.VerdifaxClient, job_id: str, step: str, run_ids: dict[str, int], payloads: dict[str, Any],
-           draft: str, draft_hash: str, reason: str) -> None:
-    """Record a refused step: its sealed receipt, every record the job sealed
-    before it, the exact payload bytes of every step including the refused
-    one, and a summary naming the step. The same for intake and for any
-    later step."""
-    refused = newest_refusal(agent)
+           draft: str, draft_hash: str, exc: APIError) -> None:
+    """Record a stopped step: its sealed receipt, every record the job sealed
+    before it, the exact payload bytes of every step including the stopped
+    one, and a summary naming the step and the kind of stop. The same for
+    intake and for any later step."""
+    row = stopped_run(agent, job_id, step, exc)
+    refused = row.run_id
     folder = Path("records") / ("refused-%d" % refused)  # named by the run, so two refusals never share a folder
-    write_json(folder / "receipt.json", agent.get_deny_receipt(refused))
+    write_json(folder / "receipt.json", stop_receipt(agent, row.status, refused))
     for sealed_step, run_id in run_ids.items():
         (folder / "steps").mkdir(parents=True, exist_ok=True)
         (folder / "steps" / ("%s.json" % sealed_step)).write_text(agent.get_run_artifacts(run_id), encoding="utf-8")
     (folder / "payloads").mkdir(parents=True, exist_ok=True)
     for name, payload in payloads.items():
         (folder / "payloads" / ("%s.json" % name)).write_text(canonical(payload), encoding="utf-8")
-    write_json(folder / "job.json", {"refused_run_id": refused, "step": step, "job_id": job_id, "draft": draft,
-                                     "draft_sha256": draft_hash, "reason": reason, "run_ids": run_ids})
-    print("refused at %s: run %d, %s" % (step, refused, reason))
+    write_json(folder / "job.json", {"refused_run_id": refused, "step": step, "stop_status": row.status, "job_id": job_id,
+                                     "draft": draft, "draft_sha256": draft_hash, "reason": exc.message, "run_ids": run_ids})
+    print("refused at %s by %s: run %d, %s" % (step, STOP_KINDS[row.status], refused, exc.message))
     print("records in %s" % folder)
 
 
@@ -333,8 +367,8 @@ def save_job_records(agent: verdifax.VerdifaxClient, job_id: str, out: Path, run
     # summary, the sign-offs and the payloads live beside that folder.
     (out / "steps").mkdir(parents=True, exist_ok=True)
     for row in rows:
-        if row.status == "pepg_deny":
-            write_json(out / "steps" / ("%s.json" % row.step_id), agent.get_deny_receipt(row.run_id))
+        if row.status in STOP_KINDS:
+            write_json(out / "steps" / ("%s.json" % row.step_id), stop_receipt(agent, row.status, row.run_id))
         else:
             (out / "steps" / ("%s.json" % row.step_id)).write_text(agent.get_run_artifacts(row.run_id), encoding="utf-8")
     # The exact bytes each step sent, so a reader recomputes the sealed
@@ -360,8 +394,7 @@ def cmd_sign_off(args: argparse.Namespace) -> None:
     key = approver_private_key()
     if args.receipt:
         run_id = int(args.receipt)
-        receipt = agent.get_deny_receipt(run_id)["deny_receipt"]
-        target = {"kind": "receipt", "run_id": run_id, "digest": receipt["hash"]}
+        target = {"kind": "receipt", "run_id": run_id, "digest": stop_receipt_hash(agent, run_id)}
         folder = next((p for p in Path("records").glob("refused-*") if (p / "job.json").exists()
                        and json.loads((p / "job.json").read_text())["refused_run_id"] == run_id), Path("records") / ("receipt-%d" % run_id))
     else:

@@ -4,12 +4,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { canonical, draftClassification, loadRules } from "../claims-review.mjs";
+import { canonical, draftClassification, loadRules, RULE_SET } from "../claims-review.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXED = { b: 1, a: "x", c: [1, 2], d: { z: true, y: null }, e: 'ü "q" \\ /' };
 const EXPECTED = '{"a":"x","b":1,"c":[1,2],"d":{"y":null,"z":true},"e":"ü \\"q\\" \\\\ /"}';
-const RULE_SET_HASH = "61110740e99a53d6fe48378a52a450f053ef2d887ef491be55801f75b4e4e1ad";
+// The rule set in force and its hash are named once, in demo-parity.json.
+const PARITY = JSON.parse(readFileSync(join(HERE, "..", "..", "demo-parity.json"), "utf8"));
 
 test("canonical JSON matches every language", () => {
   assert.equal(canonical(FIXED), EXPECTED);
@@ -18,7 +19,8 @@ test("canonical JSON matches every language", () => {
 test("the rule set hash", () => {
   const { rules, ruleSetHash } = loadRules();
   assert.equal(rules.length, 15);
-  assert.equal(ruleSetHash, RULE_SET_HASH);
+  assert.equal(RULE_SET, PARITY.constants.rule_set);
+  assert.equal(ruleSetHash, PARITY.rule_set_sha256);
 });
 
 test("the classification line", () => {

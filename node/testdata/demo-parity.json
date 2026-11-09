@@ -1,4 +1,5 @@
 {
+  "rule_set_sha256": "a64d89105aa8c78a6b5d4052bebb2e5a17bf931b3c27d6ff6cb3326ec2c66c04",
   "note": "Every command, flag, file and sealed field of the claims review demo, held equal across python, node, go and r. scripts/check-public-claims.py (rule R131) fails when a program lacks one or a language's copy differs.",
   "commands": {
     "setup": {
@@ -78,7 +79,21 @@
   "constants": {
     "default_model": "claude-fable-5-1",
     "form": "verdifax.claims-review.v1",
-    "rule_set": "v1",
+    "rule_set": "v2",
+    "stop_statuses": [
+      "pepg_deny",
+      "aivp_t4_halt",
+      "ccv_halt",
+      "macc_halt",
+      "attestation_gap"
+    ],
+    "stop_receipt_fields": [
+      "deny_receipt",
+      "aivp_t4_halt_receipt",
+      "ccv_halt_receipt",
+      "macc_halt_receipt",
+      "attestation_gap_receipt"
+    ],
     "actor_id": "claims-review-agent",
     "route_intake": "claims-review/v1/intake",
     "route_rule": "claims-review/v1/rule-check",
@@ -189,7 +204,8 @@
     "draft",
     "draft_sha256",
     "reason",
-    "run_ids"
+    "run_ids",
+    "stop_status"
   ],
   "published_fields": [
     "run_id",

@@ -33,7 +33,7 @@ import { APIError, VerdifaxClient, generateRequestKeyPair } from "verdifax";
 const DEFAULT_BASE_URL = "https://api.verdifax.com";
 const DEFAULT_MODEL = "claude-fable-5-1";
 const FORM = "verdifax.claims-review.v1";
-const RULE_SET = "v1";
+const RULE_SET = "v2";
 const ACTOR_ID = "claims-review-agent";
 const ROUTE_INTAKE = "claims-review/v1/intake";
 const ROUTE_RULE = "claims-review/v1/rule-check";
@@ -68,7 +68,7 @@ function fail(message) {
 }
 
 function loadRules() {
-  const doc = JSON.parse(readFileSync(join(REPO, "rules", "v1.json"), "utf8"));
+  const doc = JSON.parse(readFileSync(join(REPO, "rules", `${RULE_SET}.json`), "utf8"));
   return { rules: doc.rules, ruleSetHash: sha256Hex(canonical(doc)) };
 }
 
@@ -225,7 +225,7 @@ async function cmdReview(draftPath, model, answersPath) {
     // The account policy refused the draft at intake (for example a
     // confidential draft), so it never reached a model. The refusal is
     // sealed as a receipt; nothing else runs for this draft.
-    await refuse(agent, jobId, "intake", {}, { intake: intakePayload }, draftPath, draftHash, err.message);
+    await refuse(agent, jobId, "intake", {}, { intake: intakePayload }, draftPath, draftHash, err);
     return;
   }
   payloads.intake = intakePayload;
@@ -258,12 +258,12 @@ async function cmdReview(draftPath, model, answersPath) {
       });
     } catch (err) {
       if (!(err instanceof APIError)) throw err;
-      // The account policy or the server's content screen refused this
-      // step, so the job stops here: the refusal is sealed as a receipt,
-      // the steps already sealed are kept beside it, and a person sees
-      // the stop. The job never gets a verdict.
+      // The account policy, the server's content screen or its review of
+      // the model's answer stopped this step, so the job stops here: the
+      // stop is sealed as a receipt, the steps already sealed are kept
+      // beside it, and a person sees the stop. The job never gets a verdict.
       payloads[rule.id] = payload;
-      await refuse(agent, jobId, rule.id, runIds, payloads, draftPath, draftHash, err.message);
+      await refuse(agent, jobId, rule.id, runIds, payloads, draftPath, draftHash, err);
       return;
     }
     payloads[rule.id] = payload;
@@ -301,26 +301,65 @@ async function cmdReview(draftPath, model, answersPath) {
   printVerifyCommands(jobId);
 }
 
-async function newestRefusal(agent) {
-  const rows = (await agent.exportRuns()).runs.filter((r) => r.status === "pepg_deny");
-  if (rows.length === 0) fail("the step was refused but no refused run is listed for this key");
-  return Math.max(...rows.map((r) => r.run_id));
+// A step the server stopped is sealed as one run whose status names the kind
+// of stop, with a receipt of that kind (R152). Any other error is not a stop:
+// the program reports it as the server gave it and seals nothing for it.
+const STOP_KINDS = {
+  pepg_deny: "the account policy or the content screen",
+  aivp_t4_halt: "the server's review of the model's answer",
+  ccv_halt: "the per-run budget",
+  macc_halt: "the cumulative budget",
+  attestation_gap: "the policy's required attested fields",
+};
+const STOP_RECEIPT_FIELDS = {
+  pepg_deny: "deny_receipt", aivp_t4_halt: "aivp_t4_halt_receipt", ccv_halt: "ccv_halt_receipt",
+  macc_halt: "macc_halt_receipt", attestation_gap: "attestation_gap_receipt",
+};
+
+async function stopReceipt(agent, status, runId) {
+  const fetch = {
+    pepg_deny: (id) => agent.getDenyReceipt(id), aivp_t4_halt: (id) => agent.getAivpT4HaltReceipt(id),
+    ccv_halt: (id) => agent.getCCVHaltReceipt(id), macc_halt: (id) => agent.getMACCHaltReceipt(id),
+    attestation_gap: (id) => agent.getAttestationGapReceipt(id),
+  }[status];
+  return fetch(runId);
 }
 
-// Record a refused step: its sealed receipt, every record the job sealed
-// before it, the exact payload bytes of every step including the refused
-// one, and a summary naming the step. The same for intake and for any
-// later step.
-async function refuse(agent, jobId, step, runIds, payloads, draftPath, draftHash, reason) {
-  const refused = await newestRefusal(agent);
+// The sealed hash of a stopped run's receipt, whatever kind of stop it was.
+async function stopReceiptHash(agent, runId) {
+  const { status } = await agent.getRun(runId);
+  if (!(status in STOP_KINDS)) fail(`run ${runId} is ${status}, not a stopped run with a receipt`);
+  return (await stopReceipt(agent, status, runId))[STOP_RECEIPT_FIELDS[status]].hash;
+}
+
+// The run the server sealed for this job's stopped step, found by its job
+// and step, never by being the newest of the key.
+async function stoppedRun(agent, jobId, step, err) {
+  const rows = (await agent.exportRuns({ job_id: jobId })).runs.filter((r) => r.step_id === step && r.status in STOP_KINDS);
+  if (rows.length === 0) {
+    fail(`the server answered HTTP ${err.status} at ${step}: ${err.message}; it recorded no stop for this step, so nothing was sealed as one`);
+  }
+  return rows.reduce((a, b) => (b.run_id > a.run_id ? b : a));
+}
+
+// Record a stopped step: its sealed receipt, every record the job sealed
+// before it, the exact payload bytes of every step including the stopped
+// one, and a summary naming the step and the kind of stop. The same for
+// intake and for any later step.
+async function refuse(agent, jobId, step, runIds, payloads, draftPath, draftHash, err) {
+  const row = await stoppedRun(agent, jobId, step, err);
+  const refused = row.run_id;
   const folder = join("records", `refused-${refused}`); // named by the run, so two refusals never share a folder
-  writeJSON(join(folder, "receipt.json"), await agent.getDenyReceipt(refused));
+  writeJSON(join(folder, "receipt.json"), await stopReceipt(agent, row.status, refused));
   mkdirSync(join(folder, "steps"), { recursive: true });
   for (const [sealedStep, runId] of Object.entries(runIds)) writeFileSync(join(folder, "steps", `${sealedStep}.json`), await agent.getRunArtifacts(runId));
   mkdirSync(join(folder, "payloads"), { recursive: true });
   for (const [name, payload] of Object.entries(payloads)) writeFileSync(join(folder, "payloads", `${name}.json`), canonical(payload));
-  writeJSON(join(folder, "job.json"), { refused_run_id: refused, step, job_id: jobId, draft: draftPath, draft_sha256: draftHash, reason, run_ids: runIds });
-  console.log(`refused at ${step}: run ${refused}, ${reason}`);
+  writeJSON(join(folder, "job.json"), {
+    refused_run_id: refused, step, stop_status: row.status, job_id: jobId, draft: draftPath, draft_sha256: draftHash,
+    reason: err.message, run_ids: runIds,
+  });
+  console.log(`refused at ${step} by ${STOP_KINDS[row.status]}: run ${refused}, ${err.message}`);
   console.log(`records in ${folder}`);
 }
 
@@ -335,7 +374,7 @@ async function saveJobRecords(agent, jobId, out, runIds, payloads) {
   mkdirSync(join(out, "steps"), { recursive: true });
   mkdirSync(join(out, "payloads"), { recursive: true });
   for (const row of rows) {
-    if (row.status === "pepg_deny") writeJSON(join(out, "steps", `${row.step_id}.json`), await agent.getDenyReceipt(row.run_id));
+    if (row.status in STOP_KINDS) writeJSON(join(out, "steps", `${row.step_id}.json`), await stopReceipt(agent, row.status, row.run_id));
     else writeFileSync(join(out, "steps", `${row.step_id}.json`), await agent.getRunArtifacts(row.run_id));
   }
   // The exact bytes each step sent, so a reader recomputes the sealed
@@ -360,8 +399,7 @@ async function cmdSignOff(jobId, decision, note, receiptRunId) {
   let runId;
   if (receiptRunId) {
     runId = Number(receiptRunId);
-    const receipt = (await agent.getDenyReceipt(runId)).deny_receipt;
-    target = { kind: "receipt", run_id: runId, digest: receipt.hash };
+    target = { kind: "receipt", run_id: runId, digest: await stopReceiptHash(agent, runId) };
     folder = existsSync("records")
       ? readdirSync("records").filter((p) => p.startsWith("refused-")).map((p) => join("records", p))
           .find((p) => existsSync(join(p, "job.json")) && JSON.parse(readFileSync(join(p, "job.json"), "utf8")).refused_run_id === runId)
@@ -504,7 +542,7 @@ async function main() {
   }
 }
 
-export { canonical, draftClassification, loadRules, sha256Hex };
+export { canonical, draftClassification, loadRules, RULE_SET, sha256Hex };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((err) => {

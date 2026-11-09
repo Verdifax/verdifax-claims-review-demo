@@ -8,13 +8,13 @@ The same program is here in Python, Node, Go and R, built on the Verdifax SDK in
 
 - It is a demo, not customer proof. No customer is named.
 - A sealed record shows the checks ran and what the model returned. It does not show the model's judgment was right.
-- The 15 rules in [rules/v1.json](rules/v1.json) are general writing rules. They are not legal advice and not a compliance standard.
+- The 15 rules in [rules/v2.json](rules/v2.json) are general writing rules. They are not legal advice and not a compliance standard. Version 2 rewords rules 04, 05, 06 and 12 so each covers only what it was written for; [rules/v1.json](rules/v1.json) is kept as published for records sealed under it, and each record names the hash of the rule set it used.
 - The account policy judges what each step declared. It cannot show the declared facts are true.
 - A sign-off shows a registered approver key signed that decision on that exact result. It does not show who holds the key or that the review was careful, and Verdifax did not review the result.
 
 ## What happens in one review
 
-1. **Intake.** One sealed step records the draft's SHA-256, its size and the rule set's hash. A draft marked `CONFIDENTIAL` or above is refused here by the account policy, so it never reaches an outside model; the refusal is sealed as a receipt. A refusal at any later step, by the account policy or by the server's own content screen, stops the job the same way: the refusal is sealed as a receipt, the steps sealed before it are kept beside it, and the job never gets a verdict.
+1. **Intake.** One sealed step records the draft's SHA-256, its size and the rule set's hash. A draft marked `CONFIDENTIAL` or above is refused here by the account policy, so it never reaches an outside model; the refusal is sealed as a receipt. A stop at any later step stops the job the same way, whether the account policy or the server's content screen refuses the step or the server's review of the model's answer halts it: the stop is sealed as a receipt of its kind, the steps sealed before it are kept beside it, and the job never gets a verdict.
 2. **Fifteen rule steps**, one per rule, each a branch after intake. The model is sent the draft and one rule and answers in a fixed form, `{verdict, reason}`. Each step seals the rule, the answer, the model that answered (as the API's response named it), the prompt's hash and the model's exact answer, which Verdifax's own AI review also reads.
 3. **Verdict.** A final step joins all fifteen branches: pass only when every rule passed. No model call; the verdict is computed from the answers. A missing, extra or reordered step breaks the job.
 4. **Sign-off.** A person holding the approver key signs approve or reject on the verdict, or rejects a refusal's receipt.
@@ -65,9 +65,9 @@ The commands are the same in every language:
 | Command | Does |
 |---|---|
 | `setup` | Registers the owner's request key, creates the agent's key and a feed key, registers an approver key generated on this machine, and activates the account policy in [policy/claims-review-v1.json](policy/claims-review-v1.json). Runs once per account and folder. |
-| `review DRAFT.md [--model ID]` | Runs one job on the draft and writes its sealed records to `records/<job_id>/steps/` (the folder `verdifax-verify --job` reads), with the exact payload bytes beside them, so a reader recomputes every sealed payload hash. Prints the verdict, the measured model use and the verify commands. A refused step, at intake or later, stops the job: its receipt, the records sealed before it and every payload go to `records/refused-<run_id>/`, and `job.json` there names the step. |
+| `review DRAFT.md [--model ID]` | Runs one job on the draft and writes its sealed records to `records/<job_id>/steps/` (the folder `verdifax-verify --job` reads), with the exact payload bytes beside them, so a reader recomputes every sealed payload hash. Prints the verdict, the measured model use and the verify commands. A refused or halted step, at intake or later, stops the job: its receipt, the records sealed before it and every payload go to `records/refused-<run_id>/`, and `job.json` there names the step and the kind of stop. Any other error from the server is printed as the server gave it, and nothing is recorded as a stop. |
 | `sign-off JOB_ID approve\|reject [--note TEXT]` | Signs the decision on the job's verdict with the approver key. Only the note's hash is sent. |
-| `sign-off --receipt RUN_ID reject` | Signs a decision on a refusal's receipt. |
+| `sign-off --receipt RUN_ID approve\|reject` | Signs a decision on the receipt of a refused or halted step. |
 | `publish JOB_ID` | Makes every record of the job public on a random link with the owner key, and writes `records/<job_id>/published.json` with each link and the sealed publication. `publish --receipt RUN_ID` does the same for a refusal's receipt. |
 | `unpublish JOB_ID` | Withdraws the job's records from their links; a later `publish` restores the same links. `--receipt RUN_ID` for a receipt. |
 | `feed` | Reads the account's whole signal feed with the feed key into `signals.json`. |
@@ -93,7 +93,7 @@ verdifax-verify --signals signals.json
 
 ## Tests
 
-`testdata/answers.json` holds recorded model answers for tests against a local Verdifax server; the program refuses them against production. `demo-parity.json` lists every command, flag, file and sealed field, and Verdifax's checks hold the four programs equal to it.
+`testdata/answers.json` holds recorded model answers for tests against a local Verdifax server, and `answers-refused.json` and `answers-halted.json` hold two variants whose rule 3 answer the server's content screen refuses or its review of the model's answer halts; the program refuses recorded answers against production. `demo-parity.json` lists every command, flag, file and sealed field, and Verdifax's checks hold the four programs equal to it.
 
 ## License
 

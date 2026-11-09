@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,7 +10,6 @@ import (
 // The same cases every language tests.
 const (
 	expectedCanonical = `{"a":"x","b":1,"c":[1,2],"d":{"y":null,"z":true},"e":"ü \"q\" \\ /"}`
-	expectedRuleSet   = "61110740e99a53d6fe48378a52a450f053ef2d887ef491be55801f75b4e4e1ad"
 )
 
 func TestCanonicalJSONMatchesEveryLanguage(t *testing.T) {
@@ -19,10 +19,24 @@ func TestCanonicalJSONMatchesEveryLanguage(t *testing.T) {
 	}
 }
 
+// The rule set in force and its hash are named once, in demo-parity.json.
 func TestRuleSetHash(t *testing.T) {
+	text, readErr := os.ReadFile(filepath.Join(repo, "demo-parity.json"))
+	if readErr != nil {
+		t.Fatalf("read demo-parity.json: %v", readErr)
+	}
+	var parity struct {
+		RuleSetSHA256 string `json:"rule_set_sha256"`
+		Constants     struct {
+			RuleSet string `json:"rule_set"`
+		} `json:"constants"`
+	}
+	if parseErr := json.Unmarshal(text, &parity); parseErr != nil {
+		t.Fatalf("parse demo-parity.json: %v", parseErr)
+	}
 	rules, hash := loadRules()
-	if len(rules) != 15 || hash != expectedRuleSet {
-		t.Fatalf("%d rules, hash %s", len(rules), hash)
+	if len(rules) != 15 || ruleSet != parity.Constants.RuleSet || hash != parity.RuleSetSHA256 {
+		t.Fatalf("%d rules, rule set %s, hash %s; demo-parity.json names %s, %s", len(rules), ruleSet, hash, parity.Constants.RuleSet, parity.RuleSetSHA256)
 	}
 }
 

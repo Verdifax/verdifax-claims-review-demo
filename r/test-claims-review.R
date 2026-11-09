@@ -8,8 +8,11 @@ fixed <- list(b = 1L, a = "x", c = list(1L, 2L), d = list(z = TRUE, y = NULL), e
 expected <- '{"a":"x","b":1,"c":[1,2],"d":{"y":null,"z":true},"e":"ü \\"q\\" \\\\ /"}'
 check(identical(canonical(fixed), expected), "canonical JSON matches every language")
 
+# The rule set in force and its hash are named once, in demo-parity.json.
+parity <- jsonlite::fromJSON(file.path(REPO, "demo-parity.json"), simplifyVector = FALSE)
 loaded <- load_rules()
-check(length(loaded$rules) == 15 && loaded$rule_set_hash == "61110740e99a53d6fe48378a52a450f053ef2d887ef491be55801f75b4e4e1ad", "the rule set hash")
+check(length(loaded$rules) == 15 && RULE_SET == parity$constants$rule_set &&
+        loaded$rule_set_hash == parity$rule_set_sha256, "the rule set hash")
 
 check(draft_classification("# A draft\n\nText.") == "INTERNAL" &&
         draft_classification("<!-- classification: CONFIDENTIAL -->\n# Memo") == "CONFIDENTIAL", "the classification line")

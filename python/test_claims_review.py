@@ -9,7 +9,8 @@ import claims_review as cr
 HERE = pathlib.Path(__file__).resolve().parent
 FIXED = {"b": 1, "a": "x", "c": [1, 2], "d": {"z": True, "y": None}, "e": "ü \"q\" \\ /"}
 EXPECTED = '{"a":"x","b":1,"c":[1,2],"d":{"y":null,"z":true},"e":"ü \\"q\\" \\\\ /"}'
-RULE_SET_HASH = "61110740e99a53d6fe48378a52a450f053ef2d887ef491be55801f75b4e4e1ad"
+# The rule set in force and its hash are named once, in demo-parity.json.
+PARITY = json.loads((HERE.parent / "demo-parity.json").read_text(encoding="utf-8"))
 
 
 class CanonicalJSON(unittest.TestCase):
@@ -20,7 +21,8 @@ class CanonicalJSON(unittest.TestCase):
     def test_rule_set_hash(self):
         rules, rule_set_hash = cr.load_rules()
         self.assertEqual(len(rules), 15)
-        self.assertEqual(rule_set_hash, RULE_SET_HASH)
+        self.assertEqual(cr.RULE_SET, PARITY["constants"]["rule_set"])
+        self.assertEqual(rule_set_hash, PARITY["rule_set_sha256"])
 
     def test_classification_line(self):
         self.assertEqual(cr.draft_classification("# A draft\n\nText."), "INTERNAL")

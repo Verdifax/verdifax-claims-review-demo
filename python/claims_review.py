@@ -51,12 +51,13 @@ FORM = "verdifax.claims-review.v1"
 RULE_SET = "v3"
 ACTOR_ID = "claims-review-agent"
 ROUTE_INTAKE = "claims-review/v1/intake"
+ROUTE_CLAIMS = "claims-review/v1/claims"
 ROUTE_RULE = "claims-review/v1/rule-check"
 ROUTE_VERDICT = "claims-review/v1/verdict"
 OBJECT_PREFIX = "claims-review/v1/"
 LEVELS = ("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
 VERDICTS = ("pass", "fail", "unanswered")
-MIN_VERIFIER = "v0.27.0"
+MIN_VERIFIER = "v0.28.0"
 # A stopped step's records live in records/stopped-<run_id>/, and the
 # model's exact answers in answers/ beside each job's steps/.
 STOPPED_FOLDER_PREFIX = "stopped-"
@@ -64,8 +65,13 @@ ANSWERS_FOLDER = "answers"
 # The text the server's AI review checked for each step, as the server
 # returned it once: a reader re-runs the review's check from these files.
 TRACES_FOLDER = "traces"
-# The account policy setup activates; v1 stays for records sealed under it.
-POLICY_FILE = "claims-review-v2.json"
+# The account policy setup activates; v1 and v2 stay for records sealed
+# under them. v3 requires a reviewed AI answer on every step after the gate.
+POLICY_FILE = "claims-review-v3.json"
+# The AI's work on the steps after the gate: listing the draft's claims,
+# and explaining the verdict code decided.
+CLAIMS_PROMPT = "claims-prompt-v1.txt"
+VERDICT_PROMPT = "verdict-prompt-v1.txt"
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 
@@ -94,8 +100,8 @@ def load_rules() -> tuple[list[dict[str, str]], str]:
     return doc["rules"], sha256_hex(canonical(doc).encode("utf-8"))
 
 
-def load_prompt() -> str:
-    return (REPO / "rules" / "prompt-v1.txt").read_text(encoding="utf-8")
+def load_prompt(name: str = "prompt-v1.txt") -> str:
+    return (REPO / "rules" / name).read_text(encoding="utf-8")
 
 
 def base_url() -> str:
@@ -218,6 +224,55 @@ class Answers:
         return {"model": response.model, "response_id": response.id, "verdict": verdict, "reason": parsed.reason, "raw": raw, **usage}
 
 
+    def ask_claims(self, prompt: str, user_text: str, model: str) -> dict[str, Any]:
+        """The draft's claims, as the model listed them. The exact answer is
+        the step's AI output, reviewed and sealed."""
+        if self.recorded is not None:
+            a = self.recorded["claims"]
+            return {"model": a.get("model", "recorded-answers"), "response_id": a.get("response_id", "recorded"),
+                    "claims": a["claims"], "raw": canonical({"claims": a["claims"]}), "input_tokens": 0, "output_tokens": 0}
+        import anthropic
+        from pydantic import BaseModel
+
+        class ClaimList(BaseModel):
+            claims: list[str]
+
+        client = anthropic.Anthropic()
+        response = client.messages.parse(model=model, max_tokens=4000, system=prompt,
+                                         messages=[{"role": "user", "content": user_text}], output_format=ClaimList)
+        usage = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens}
+        raw = next((b.text for b in response.content if b.type == "text"), "")
+        if response.stop_reason == "refusal" or response.parsed_output is None:
+            return {"model": response.model, "response_id": response.id, "claims": [],
+                    "raw": raw or "the model declined to list the claims", **usage}
+        return {"model": response.model, "response_id": response.id, "claims": response.parsed_output.claims, "raw": raw, **usage}
+
+    def ask_explanation(self, prompt: str, user_text: str, model: str) -> dict[str, Any]:
+        """The model's plain-words explanation of the verdict code decided.
+        The exact answer is the verdict step's AI output, reviewed and sealed."""
+        if self.recorded is not None:
+            a = self.recorded["verdict"]
+            return {"model": a.get("model", "recorded-answers"), "response_id": a.get("response_id", "recorded"),
+                    "explanation": a["explanation"], "raw": canonical({"explanation": a["explanation"]}),
+                    "input_tokens": 0, "output_tokens": 0}
+        import anthropic
+        from pydantic import BaseModel
+
+        class Explanation(BaseModel):
+            explanation: str
+
+        client = anthropic.Anthropic()
+        response = client.messages.parse(model=model, max_tokens=2000, system=prompt,
+                                         messages=[{"role": "user", "content": user_text}], output_format=Explanation)
+        usage = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens}
+        raw = next((b.text for b in response.content if b.type == "text"), "")
+        if response.stop_reason == "refusal" or response.parsed_output is None:
+            return {"model": response.model, "response_id": response.id, "explanation": "",
+                    "raw": raw or "the model declined to explain the verdict", **usage}
+        return {"model": response.model, "response_id": response.id, "explanation": response.parsed_output.explanation,
+                "raw": raw, **usage}
+
+
 def measured_cost(model: str, input_tokens: int, output_tokens: int) -> Optional[float]:
     prices = json.loads((REPO / "rules" / "model-prices-v1.json").read_text(encoding="utf-8"))["prices"]
     if model not in prices:
@@ -267,6 +322,42 @@ def cmd_review(args: argparse.Namespace) -> None:
     answer_texts: dict[str, str] = {}
     # The text the server's AI review checked, returned once with each step.
     trace_texts: dict[str, str] = {}
+
+    # The gate passed, so the draft may reach a model. Every step from here
+    # carries the model's answer, which Verdifax's AI review reads and the
+    # record seals; the account policy refuses any step without one.
+    claims_prompt = load_prompt(CLAIMS_PROMPT)
+    claims_text = "Draft:\n%s" % draft
+    claims_prompt_hash = sha256_hex((claims_prompt + "\n" + claims_text).encode("utf-8"))
+    listed = answers.ask_claims(claims_prompt, claims_text, args.model)
+    tokens["input"] += listed["input_tokens"]
+    tokens["output"] += listed["output_tokens"]
+    models.add(listed["model"])
+    answer_texts["claims"] = listed["raw"]
+    claims_payload = {"form": FORM, "step": "claims", "draft_sha256": draft_hash, "rule_set_hash": rule_set_hash,
+                      "model": listed["model"], "model_response_id": listed["response_id"], "prompt_hash": claims_prompt_hash,
+                      "claims": listed["claims"]}
+    try:
+        claims_step = job.step("claims", after=["intake"], payload=canonical(claims_payload), program_id=PROGRAM_ID,
+                               route_id=ROUTE_CLAIMS, registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer_texts["claims"],
+                               attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
+                                                                         model_name=listed["model"], prompt_hash=claims_prompt_hash,
+                                                                         decision_kind="claims.list",
+                                                                         decision_result=str(len(listed["claims"]))),
+                               policy_context={"object_type": "text", "object_id": OBJECT_PREFIX + "claims", "classification": level})
+    except APIError as exc:
+        payloads["claims"] = claims_payload
+        if exc.aivp_trace_text:
+            trace_texts["claims"] = exc.aivp_trace_text
+        stop(agent, job_id, "claims", run_ids, payloads, answer_texts, str(draft_path), draft_hash, exc, args.model, tokens, models,
+             trace_texts)
+        return
+    if claims_step.aivp_trace_text:
+        trace_texts["claims"] = claims_step.aivp_trace_text
+    payloads["claims"] = claims_payload
+    run_ids["claims"] = claims_step.run_id
+    print("claims: %d listed" % len(listed["claims"]))
+
     for rule in rules:
         user_text = "Rule %s: %s\n\nDraft:\n%s" % (rule["id"], rule["text"], draft)
         prompt_hash = sha256_hex((prompt + "\n" + user_text).encode("utf-8"))
@@ -279,7 +370,7 @@ def cmd_review(args: argparse.Namespace) -> None:
                    "rule_set_hash": rule_set_hash, "model": answer["model"], "model_response_id": answer["response_id"],
                    "prompt_hash": prompt_hash, "verdict": answer["verdict"], "reason": answer["reason"]}
         try:
-            receipt = job.step(rule["id"], after=["intake"], payload=canonical(payload), program_id=PROGRAM_ID, route_id=ROUTE_RULE,
+            receipt = job.step(rule["id"], after=["claims"], payload=canonical(payload), program_id=PROGRAM_ID, route_id=ROUTE_RULE,
                                registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer_texts[rule["id"]],
                                attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
                                                                          model_name=answer["model"], prompt_hash=prompt_hash,
@@ -304,23 +395,48 @@ def cmd_review(args: argparse.Namespace) -> None:
         results.append({"rule_id": rule["id"], "verdict": answer["verdict"], "reason": answer["reason"]})
         print("%s %s: %s" % (rule["id"], answer["verdict"], answer["reason"]))
 
+    # The program decides the verdict from the rule answers, so anyone can
+    # decide it again from the sealed records; the model only explains it.
     failed = [r["rule_id"] for r in results if r["verdict"] != "pass"]
+    verdict = "pass" if not failed else "fail"
+    verdict_prompt = load_prompt(VERDICT_PROMPT)
+    verdict_text = "Verdict: %s\n\nRule results:\n%s" % (verdict, canonical(results))
+    verdict_prompt_hash = sha256_hex((verdict_prompt + "\n" + verdict_text).encode("utf-8"))
+    explained = answers.ask_explanation(verdict_prompt, verdict_text, args.model)
+    tokens["input"] += explained["input_tokens"]
+    tokens["output"] += explained["output_tokens"]
+    models.add(explained["model"])
+    answer_texts["verdict"] = explained["raw"]
     verdict_payload = {"form": FORM, "step": "verdict", "draft_sha256": draft_hash, "rule_set_hash": rule_set_hash,
-                       "verdict": "pass" if not failed else "fail", "failed_rules": failed, "results": results}
-    final = job.step("verdict", after=[r["id"] for r in rules], final=True, payload=canonical(verdict_payload), program_id=PROGRAM_ID,
-                     route_id=ROUTE_VERDICT, registry_record_hash=REGISTRY_RECORD_HASH,
-                     attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, decision_kind="claims.verdict",
-                                                               decision_result=verdict_payload["verdict"]),
-                     policy_context={"object_type": "text", "object_id": OBJECT_PREFIX + "verdict", "classification": level})
+                       "verdict": verdict, "failed_rules": failed, "results": results, "model": explained["model"],
+                       "model_response_id": explained["response_id"], "prompt_hash": verdict_prompt_hash,
+                       "explanation": explained["explanation"]}
+    try:
+        final = job.step("verdict", after=[r["id"] for r in rules], final=True, payload=canonical(verdict_payload), program_id=PROGRAM_ID,
+                         route_id=ROUTE_VERDICT, registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer_texts["verdict"],
+                         attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
+                                                                   model_name=explained["model"], prompt_hash=verdict_prompt_hash,
+                                                                   decision_kind="claims.verdict", decision_result=verdict),
+                         policy_context={"object_type": "text", "object_id": OBJECT_PREFIX + "verdict", "classification": level})
+    except APIError as exc:
+        payloads["verdict"] = verdict_payload
+        if exc.aivp_trace_text:
+            trace_texts["verdict"] = exc.aivp_trace_text
+        stop(agent, job_id, "verdict", run_ids, payloads, answer_texts, str(draft_path), draft_hash, exc, args.model, tokens, models,
+             trace_texts)
+        return
+    if final.aivp_trace_text:
+        trace_texts["verdict"] = final.aivp_trace_text
     payloads["verdict"] = verdict_payload
     run_ids["verdict"] = final.run_id
+    print("verdict explained: %s" % explained["explanation"])
 
     save_job_records(agent, job_id, out, run_ids, payloads)
     save_answers(out, answer_texts)
     save_texts(out / TRACES_FOLDER, trace_texts)
     cost = measured_cost(args.model, tokens["input"], tokens["output"]) if len(models) == 1 and args.model in models else None
     summary = {"job_id": job_id, "draft": str(draft_path), "draft_sha256": draft_hash, "rule_set_hash": rule_set_hash,
-               "verdict": verdict_payload["verdict"], "failed_rules": failed, "models": sorted(models),
+               "verdict": verdict, "failed_rules": failed, "models": sorted(models),
                "final_run_id": final.run_id, "run_ids": run_ids,
                "measured_tokens": tokens, "measured_cost_usd": cost}
     write_json(out / "job.json", summary)

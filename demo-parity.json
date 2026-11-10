@@ -99,10 +99,11 @@
     "route_rule": "claims-review/v1/rule-check",
     "route_verdict": "claims-review/v1/verdict",
     "object_prefix": "claims-review/v1/",
-    "min_verifier": "v0.27.0",
+    "min_verifier": "v0.28.0",
     "program_id_source": "verdifax-claims-review-demo/program/v1",
     "registry_record_hash_source": "verdifax-claims-review-demo/registry/v1",
     "decision_kinds": [
+      "claims.list",
       "claims.rule_check",
       "claims.verdict"
     ],
@@ -114,10 +115,14 @@
     "stopped_folder_prefix": "stopped-",
     "answers_folder": "answers",
     "traces_folder": "traces",
-    "policy_file": "claims-review-v2.json"
+    "policy_file": "claims-review-v3.json",
+    "route_claims": "claims-review/v1/claims",
+    "claims_prompt": "claims-prompt-v1.txt",
+    "verdict_prompt": "verdict-prompt-v1.txt"
   },
   "steps": {
     "intake": "intake",
+    "claims": "claims",
     "rules": [
       "rule-01",
       "rule-02",
@@ -147,6 +152,16 @@
       "rule_set_hash",
       "classification"
     ],
+    "claims": [
+      "form",
+      "step",
+      "draft_sha256",
+      "rule_set_hash",
+      "model",
+      "model_response_id",
+      "prompt_hash",
+      "claims"
+    ],
     "rule": [
       "form",
       "step",
@@ -167,10 +182,23 @@
       "rule_set_hash",
       "verdict",
       "failed_rules",
-      "results"
+      "results",
+      "model",
+      "model_response_id",
+      "prompt_hash",
+      "explanation"
     ]
   },
   "attested_context": {
+    "claims": [
+      "attested",
+      "actor_id",
+      "model_provider",
+      "model_name",
+      "prompt_hash",
+      "decision_kind",
+      "decision_result"
+    ],
     "rule": [
       "attested",
       "actor_id",
@@ -183,6 +211,9 @@
     "verdict": [
       "attested",
       "actor_id",
+      "model_provider",
+      "model_name",
+      "prompt_hash",
       "decision_kind",
       "decision_result"
     ]
@@ -200,7 +231,7 @@
     "measured_tokens",
     "measured_cost_usd"
   ],
-  "prompt_hash": "sha256 of the prompt file's bytes, a newline, and the user text 'Rule <id>: <text>\\n\\nDraft:\\n<draft>'",
+  "prompt_hash": "sha256 of the step's prompt file's bytes, a newline, and its user text: rule steps 'Rule <id>: <text>\\n\\nDraft:\\n<draft>' with prompt-v1.txt; the claims step 'Draft:\\n<draft>' with claims-prompt-v1.txt; the verdict step 'Verdict: <verdict>\\n\\nRule results:\\n<canonical results>' with verdict-prompt-v1.txt",
   "stopped_summary_fields": [
     "stopped_run_id",
     "step",
@@ -225,6 +256,7 @@
   "input_sha256": {
     "policy/claims-review-v1.json": "0c5c2e87bd93b6673add343c16bfb0417949630da8d5cade2ac5c130adc2208c",
     "policy/claims-review-v2.json": "aa5ad832eca29aa2d9ebba7bd19807278072d9574a10b442ff23637bfc7f84e0",
+    "policy/claims-review-v3.json": "2b59b1724a4092db354b53cbcef7399ee9a32d8f594d65e877d57b52d8eb2cc3",
     "samples/clean-release-notes.md": "8db819ae649d022e31e874b99efd6c904998be3340021fe0087870a834a9d79a",
     "samples/clean-sales-email.md": "4f8b28f36caaa97e3d71c5f1c9c40c1ee393fced730fad3305d79d64c9f8ff56",
     "samples/confidential-board-memo.md": "bfe20c658d69cf30d9dade02b50f8d7aabc18913b1a3a65cda616e17633d6d6f",

@@ -41,11 +41,12 @@ const FORM = "verdifax.claims-review.v1";
 const RULE_SET = "v3";
 const ACTOR_ID = "claims-review-agent";
 const ROUTE_INTAKE = "claims-review/v1/intake";
+const ROUTE_CLAIMS = "claims-review/v1/claims";
 const ROUTE_RULE = "claims-review/v1/rule-check";
 const ROUTE_VERDICT = "claims-review/v1/verdict";
 const OBJECT_PREFIX = "claims-review/v1/";
 const LEVELS = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI"];
-const MIN_VERIFIER = "v0.27.0";
+const MIN_VERIFIER = "v0.28.0";
 // A stopped step's records live in records/stopped-<run_id>/, and the
 // model's exact answers in answers/ beside each job's steps/.
 const STOPPED_FOLDER_PREFIX = "stopped-";
@@ -54,7 +55,11 @@ const ANSWERS_FOLDER = "answers";
 // returned it once: a reader re-runs the review's check from these files.
 const TRACES_FOLDER = "traces";
 // The account policy setup activates; v1 stays for records sealed under it.
-const POLICY_FILE = "claims-review-v2.json";
+const POLICY_FILE = "claims-review-v3.json";
+// The AI's work on the steps after the gate: listing the draft's claims, and
+// explaining the verdict code decided.
+const CLAIMS_PROMPT = "claims-prompt-v1.txt";
+const VERDICT_PROMPT = "verdict-prompt-v1.txt";
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const sha256Hex = (data) => createHash("sha256").update(data).digest("hex");
@@ -86,7 +91,7 @@ function loadRules() {
   return { rules: doc.rules, ruleSetHash: sha256Hex(canonical(doc)) };
 }
 
-const loadPrompt = () => readFileSync(join(REPO, "rules", "prompt-v1.txt"), "utf8");
+const loadPrompt = (name = "prompt-v1.txt") => readFileSync(join(REPO, "rules", name), "utf8");
 
 // A file's exact bytes as UTF-8 text, so a sealed draft or policy hash
 // matches the file (R170).
@@ -202,6 +207,46 @@ async function ask(recorded, prompt, userText, ruleId, model) {
   return { model: response.model, responseId: response.id, verdict, reason: parsed.reason, raw, ...usage };
 }
 
+// askStructured asks the model for one structured answer. recordedKey names
+// the recorded answer for tests; makeShape builds the zod object it parses;
+// declined is the text kept as the AI output when the model declines, and
+// empty the fields then.
+async function askStructured(recorded, recordedKey, prompt, userText, model, maxTokens, makeShape, declined, empty) {
+  if (recorded) {
+    const a = recorded[recordedKey];
+    const { model: m, response_id: r, ...fields } = a;
+    return { model: m || "recorded-answers", responseId: r || "recorded", fields, raw: canonical(fields), inputTokens: 0, outputTokens: 0 };
+  }
+  const { default: Anthropic } = await import("@anthropic-ai/sdk");
+  const { zodOutputFormat } = await import("@anthropic-ai/sdk/helpers/zod");
+  const { z } = await import("zod");
+  const client = new Anthropic();
+  const response = await client.messages.parse({
+    model,
+    max_tokens: maxTokens,
+    system: prompt,
+    messages: [{ role: "user", content: userText }],
+    output_config: { format: zodOutputFormat(makeShape(z)) },
+  });
+  const usage = { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens };
+  const raw = (response.content.find((b) => b.type === "text") || {}).text || "";
+  if (response.stop_reason === "refusal" || !response.parsed_output) {
+    return { model: response.model, responseId: response.id, fields: empty, raw: raw || declined, ...usage };
+  }
+  return { model: response.model, responseId: response.id, fields: response.parsed_output, raw, ...usage };
+}
+
+// The draft's claims, as the model listed them; the exact answer is the
+// step's AI output, reviewed and sealed.
+const askClaims = (recorded, prompt, userText, model) =>
+  askStructured(recorded, "claims", prompt, userText, model, 4000, (z) => z.object({ claims: z.array(z.string()) }),
+    "the model declined to list the claims", { claims: [] });
+
+// The model's plain-words explanation of the verdict code decided.
+const askExplanation = (recorded, prompt, userText, model) =>
+  askStructured(recorded, "verdict", prompt, userText, model, 2000, (z) => z.object({ explanation: z.string() }),
+    "the model declined to explain the verdict", { explanation: "" });
+
 function measuredCost(model, inputTokens, outputTokens) {
   const prices = JSON.parse(readFileSync(join(REPO, "rules", "model-prices-v1.json"), "utf8")).prices;
   if (!prices[model]) return null;
@@ -259,6 +304,45 @@ async function cmdReview(draftPath, model, answersPath) {
   const answerTexts = {};
   // The text the server's AI review checked, returned once with each step.
   const traceTexts = {};
+
+  // The gate passed, so the draft may reach a model. Every step from here
+  // carries the model's answer, which Verdifax's AI review reads and the
+  // record seals; the account policy refuses any step without one.
+  const claimsPrompt = loadPrompt(CLAIMS_PROMPT);
+  const claimsText = `Draft:\n${draft}`;
+  const claimsPromptHash = sha256Hex(claimsPrompt + "\n" + claimsText);
+  const listed = await askClaims(recorded, claimsPrompt, claimsText, model);
+  tokens.input += listed.inputTokens;
+  tokens.output += listed.outputTokens;
+  models.add(listed.model);
+  answerTexts.claims = listed.raw;
+  const claimsPayload = {
+    form: FORM, step: "claims", draft_sha256: draftHash, rule_set_hash: ruleSetHash, model: listed.model,
+    model_response_id: listed.responseId, prompt_hash: claimsPromptHash, claims: listed.fields.claims,
+  };
+  let claimsStep;
+  try {
+    claimsStep = await job.step("claims", {
+      after: ["intake"], payload_text: canonical(claimsPayload), program_id: PROGRAM_ID, route_id: ROUTE_CLAIMS,
+      registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answerTexts.claims,
+      attested_context: {
+        attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: listed.model, prompt_hash: claimsPromptHash,
+        decision_kind: "claims.list", decision_result: String(listed.fields.claims.length),
+      },
+      policy_context: policy("claims"),
+    });
+  } catch (err) {
+    if (!(err instanceof APIError)) throw err;
+    payloads.claims = claimsPayload;
+    if (err.aivpTraceText) traceTexts.claims = err.aivpTraceText;
+    await stop(agent, jobId, "claims", runIds, payloads, answerTexts, draftPath, draftHash, err, model, tokens, models, traceTexts);
+    return;
+  }
+  if (claimsStep.aivp_trace_text) traceTexts.claims = claimsStep.aivp_trace_text;
+  payloads.claims = claimsPayload;
+  runIds.claims = claimsStep.run_id;
+  console.log(`claims: ${listed.fields.claims.length} listed`);
+
   for (const rule of rules) {
     const userText = `Rule ${rule.id}: ${rule.text}\n\nDraft:\n${draft}`;
     const promptHash = sha256Hex(prompt + "\n" + userText);
@@ -274,7 +358,7 @@ async function cmdReview(draftPath, model, answersPath) {
     let receipt;
     try {
       receipt = await job.step(rule.id, {
-        after: ["intake"], payload_text: canonical(payload), program_id: PROGRAM_ID, route_id: ROUTE_RULE,
+        after: ["claims"], payload_text: canonical(payload), program_id: PROGRAM_ID, route_id: ROUTE_RULE,
         registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answerTexts[rule.id],
         attested_context: {
           attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: answer.model, prompt_hash: promptHash,
@@ -300,26 +384,52 @@ async function cmdReview(draftPath, model, answersPath) {
     console.log(`${rule.id} ${answer.verdict}: ${answer.reason}`);
   }
 
+  // The program decides the verdict from the rule answers, so anyone can
+  // decide it again from the sealed records; the model only explains it.
   const failed = results.filter((r) => r.verdict !== "pass").map((r) => r.rule_id);
+  const verdict = failed.length === 0 ? "pass" : "fail";
+  const verdictPrompt = loadPrompt(VERDICT_PROMPT);
+  const verdictText = `Verdict: ${verdict}\n\nRule results:\n${canonical(results)}`;
+  const verdictPromptHash = sha256Hex(verdictPrompt + "\n" + verdictText);
+  const explained = await askExplanation(recorded, verdictPrompt, verdictText, model);
+  tokens.input += explained.inputTokens;
+  tokens.output += explained.outputTokens;
+  models.add(explained.model);
+  answerTexts.verdict = explained.raw;
   const verdictPayload = {
-    form: FORM, step: "verdict", draft_sha256: draftHash, rule_set_hash: ruleSetHash,
-    verdict: failed.length === 0 ? "pass" : "fail", failed_rules: failed, results,
+    form: FORM, step: "verdict", draft_sha256: draftHash, rule_set_hash: ruleSetHash, verdict, failed_rules: failed, results,
+    model: explained.model, model_response_id: explained.responseId, prompt_hash: verdictPromptHash,
+    explanation: explained.fields.explanation,
   };
-  const final = await job.step("verdict", {
-    after: rules.map((r) => r.id), final: true, payload_text: canonical(verdictPayload), program_id: PROGRAM_ID,
-    route_id: ROUTE_VERDICT, registry_record_hash: REGISTRY_RECORD_HASH,
-    attested_context: { attested: true, actor_id: ACTOR_ID, decision_kind: "claims.verdict", decision_result: verdictPayload.verdict },
-    policy_context: policy("verdict"),
-  });
+  let final;
+  try {
+    final = await job.step("verdict", {
+      after: rules.map((r) => r.id), final: true, payload_text: canonical(verdictPayload), program_id: PROGRAM_ID,
+      route_id: ROUTE_VERDICT, registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answerTexts.verdict,
+      attested_context: {
+        attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: explained.model, prompt_hash: verdictPromptHash,
+        decision_kind: "claims.verdict", decision_result: verdict,
+      },
+      policy_context: policy("verdict"),
+    });
+  } catch (err) {
+    if (!(err instanceof APIError)) throw err;
+    payloads.verdict = verdictPayload;
+    if (err.aivpTraceText) traceTexts.verdict = err.aivpTraceText;
+    await stop(agent, jobId, "verdict", runIds, payloads, answerTexts, draftPath, draftHash, err, model, tokens, models, traceTexts);
+    return;
+  }
+  if (final.aivp_trace_text) traceTexts.verdict = final.aivp_trace_text;
   payloads.verdict = verdictPayload;
   runIds.verdict = final.run_id;
+  console.log(`verdict explained: ${explained.fields.explanation}`);
 
   await saveJobRecords(agent, jobId, out, runIds, payloads);
   saveAnswers(out, answerTexts);
   saveTexts(join(out, TRACES_FOLDER), traceTexts);
   const cost = models.size === 1 && models.has(model) ? measuredCost(model, tokens.input, tokens.output) : null;
   const summary = {
-    job_id: jobId, draft: draftPath, draft_sha256: draftHash, rule_set_hash: ruleSetHash, verdict: verdictPayload.verdict,
+    job_id: jobId, draft: draftPath, draft_sha256: draftHash, rule_set_hash: ruleSetHash, verdict,
     failed_rules: failed, models: [...models].sort(), final_run_id: final.run_id, run_ids: runIds,
     measured_tokens: tokens, measured_cost_usd: cost,
   };

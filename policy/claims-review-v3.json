@@ -1,0 +1,96 @@
+{
+  "schema": "psl.v1",
+  "policy_id": "claims-review-demo-rules",
+  "policy_name": "Claims review demo rules",
+  "policy_version": "3",
+  "effective_at": "2026-11-10T00:00:00Z",
+  "default_effect": "deny",
+  "rules": [
+    {
+      "rule_id": "no-confidential-text",
+      "effect": "deny",
+      "subject": {
+        "type": "any",
+        "id_match": {
+          "operator": "any"
+        }
+      },
+      "verb": {
+        "match": {
+          "operator": "any"
+        }
+      },
+      "object": {
+        "type": "text",
+        "id_match": {
+          "operator": "any"
+        },
+        "classification_min": "CONFIDENTIAL"
+      },
+      "reason_code": "CLAIMS_REVIEW_CONFIDENTIAL_DRAFT"
+    },
+    {
+      "rule_id": "review-steps",
+      "effect": "allow",
+      "subject": {
+        "type": "any",
+        "id_match": {
+          "operator": "any"
+        }
+      },
+      "verb": {
+        "match": {
+          "operator": "in",
+          "values": [
+            "claims.list",
+            "claims.rule_check",
+            "claims.verdict"
+          ]
+        }
+      },
+      "object": {
+        "type": "text",
+        "id_match": {
+          "operator": "prefix",
+          "value": "claims-review/v1/"
+        },
+        "classification_max": "INTERNAL"
+      },
+      "conditions": [
+        {
+          "type": "rate_limit",
+          "max_per_window": 400,
+          "window_seconds": 3600
+        }
+      ],
+      "ai_review": {
+        "contradiction": "halt",
+        "required": true
+      }
+    },
+    {
+      "rule_id": "intake",
+      "effect": "allow",
+      "subject": {
+        "type": "any",
+        "id_match": {
+          "operator": "any"
+        }
+      },
+      "verb": {
+        "match": {
+          "operator": "exact",
+          "value": "claims-review/v1/intake"
+        }
+      },
+      "object": {
+        "type": "text",
+        "id_match": {
+          "operator": "exact",
+          "value": "claims-review/v1/intake"
+        },
+        "classification_max": "INTERNAL"
+      }
+    }
+  ]
+}

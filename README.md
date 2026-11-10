@@ -14,14 +14,15 @@ The same program is here in Python, Node, Go and R, built on the Verdifax SDK in
 
 ## What happens in one review
 
-1. **Intake.** One sealed step records the draft's SHA-256, its size and the rule set's hash. A draft marked `CONFIDENTIAL` or above is refused here by the account policy, so it never reaches an outside model; the refusal is sealed as a receipt. A stop at any later step stops the job the same way, whether the account policy or the server's content screen refuses the step or the server's review of the model's answer halts it: the stop is sealed as a receipt of its kind, the steps sealed before it are kept beside it, and the job never gets a verdict.
-2. **Fifteen rule steps**, one per rule, each a branch after intake. The model is sent the draft and one rule and answers in a fixed form, `{verdict, reason}`. Each step seals the rule, the answer, the model that answered (as the API's response named it), the prompt's hash and the model's exact answer, which Verdifax's own AI review also reads. The review lists the statements the answer makes and checks them against each other for a contradiction; each step's record seals what it found, the SHA-256 of the text it checked, and what the account policy chose a contradiction does. The demo's policy, [policy/claims-review-v2.json](policy/claims-review-v2.json), writes that choice out on its rule-check rule as `"ai_review": {"contradiction": "halt"}`, the default: a contradiction stops the job. Change `halt` to `record` and a contradiction is sealed while the job continues to its verdict and a person's sign-off.
-3. **Verdict.** A final step joins all fifteen branches: pass only when every rule passed. No model call; the verdict is computed from the answers. A missing, extra or reordered step breaks the job.
-4. **Sign-off.** A person holding the approver key signs approve or reject on the verdict, or on the receipt of a refused or halted step. A decision means the same on every result: approve agrees with the result signed, the verdict or the stop the receipt records, and reject judges it wrong. A sign-off releases or blocks nothing on its own.
-5. **Publish.** The account's owner key makes the job's records public on random links, or withdraws them. Each decision is sealed by Verdifax as a run publication with its place in the feed, so an auditor sees who made what public and when.
-6. **Feed.** The refusals, the sign-offs, the publications and the key changes appear in the account's signal feed, as a GRC system would receive them.
+1. **Intake.** One sealed step records the draft's SHA-256, its size and the rule set's hash. No model is called at intake. A draft marked `CONFIDENTIAL` or above is refused here by the account policy, so it never reaches an outside model; the refusal is sealed as a receipt. A stop at any later step stops the job the same way, whether the account policy or the server's content screen refuses the step or the server's review of the model's answer halts it: the stop is sealed as a receipt of its kind, the steps sealed before it are kept beside it, and the job never gets a verdict.
+2. **Claims.** The gate passed, so the draft may reach a model. The model lists the factual claims the draft makes, without judging them. The step seals the list, the model that answered, the prompt's hash and the model's exact answer, which Verdifax's own AI review reads: it lists the statements the answer makes and checks them against each other for a contradiction, and the record seals what it found, the SHA-256 of the text it checked, and what the account policy chose a contradiction does.
+3. **Fifteen rule steps**, one per rule, each a branch after the claims step. The model is sent the draft and one rule and answers in a fixed form, `{verdict, reason}`. Each step seals the rule, the answer, the model that answered (as the API's response named it), the prompt's hash and the model's exact answer, reviewed the same way. The demo's policy, [policy/claims-review-v3.json](policy/claims-review-v3.json), writes the review's setting out on its rule for every step after the gate as `"ai_review": {"contradiction": "halt", "required": true}`: a contradiction stops the job, and the server refuses any of these steps that carries no AI answer, so none can finish without a sealed review. Change `halt` to `record` and a contradiction is sealed while the job continues to its verdict and a person's sign-off.
+4. **Verdict.** A final step joins all fifteen branches. The program decides it from the rule answers: pass only when every rule passed, so anyone can decide it again from the sealed records. The model then explains that verdict in plain words for an executive, from the verdict and the rule results only (it is not sent the draft), and its explanation is reviewed and sealed like every other answer. A missing, extra or reordered step breaks the job.
+5. **Sign-off.** A person holding the approver key signs approve or reject on the verdict, or on the receipt of a refused or halted step. A decision means the same on every result: approve agrees with the result signed, the verdict or the stop the receipt records, and reject judges it wrong. A sign-off releases or blocks nothing on its own.
+6. **Publish.** The account's owner key makes the job's records public on random links, or withdraws them. Each decision is sealed by Verdifax as a run publication with its place in the feed, so an auditor sees who made what public and when.
+7. **Feed.** The refusals, the sign-offs, the publications and the key changes appear in the account's signal feed, as a GRC system would receive them.
 
-Every record and its place in the job is anchored on the public log, and `verdifax-verify` checks it all offline; it reads every part of these records since v0.27.0. An earlier release refuses the AI review's record in each step and the version 2 publications in the feed, which name who decided each one.
+Every record and its place in the job is anchored on the public log, and `verdifax-verify` checks it all offline; it reads every part of these records since v0.28.0, which hashes the review requirement in the demo's version 3 policy and runs it again. Records sealed under the version 2 policy, before the claims step, verify since v0.27.0.
 
 ## Run it on your own drafts
 
@@ -54,7 +55,7 @@ CLAIMS_REVIEW_REPO=/path/to/verdifax-claims-review-demo /path/to/verdifax-claims
 
 ```bash
 # R 4.3 or later
-Rscript -e 'install.packages(c("remotes", "sodium")); remotes::install_github("Verdifax/verdifax-sdk-r@v1.9.0")'
+Rscript -e 'install.packages(c("remotes", "sodium")); remotes::install_github("Verdifax/verdifax-sdk-r@v1.10.0")'
 Rscript /path/to/verdifax-claims-review-demo/r/claims-review.R setup
 Rscript /path/to/verdifax-claims-review-demo/r/claims-review.R review draft.md
 ```
@@ -63,7 +64,7 @@ The commands and the files are the same in every language: a folder set up by on
 
 | Command | Does |
 |---|---|
-| `setup` | Registers the owner's request key, creates the agent's key and a feed key, registers an approver key generated on this machine, and activates the account policy in [policy/claims-review-v2.json](policy/claims-review-v2.json) ([v1](policy/claims-review-v1.json) is kept for records sealed under it). Runs once in a folder. Running it in a second folder for the same account adds another agent key, feed key and approver key. |
+| `setup` | Registers the owner's request key, creates the agent's key and a feed key, registers an approver key generated on this machine, and activates the account policy in [policy/claims-review-v3.json](policy/claims-review-v3.json) ([v1](policy/claims-review-v1.json) and [v2](policy/claims-review-v2.json) are kept for records sealed under them). Runs once in a folder. Running it in a second folder for the same account adds another agent key, feed key and approver key. |
 | `review DRAFT.md [--model ID]` | Runs one job on the draft and writes its sealed records to `records/<job_id>/steps/` (the folder `verdifax-verify --job` reads), with the exact payload bytes beside them, so a reader recomputes every sealed payload hash. Prints the verdict, the measured model use and the verify commands. The model's exact answers go to `records/<job_id>/answers/`, one file per rule, so a reader recomputes each sealed `ai_output_hash`, and the text Verdifax's AI review checked goes to `records/<job_id>/traces/`, as the server returns it once, so a reader re-runs the review's check. A refused or halted step, at intake or later, stops the job: its receipt, the records sealed before it, every payload, every answer and every review trace go to `records/stopped-<run_id>/`, and `job.json` there names the step, the kind of stop and the model use spent before it. Any other error from the server is printed as the server gave it, and nothing is recorded as a stop. |
 | `sign-off JOB_ID approve\|reject [--note TEXT]` | Signs the decision on the job's verdict with the approver key. Only the note's hash is sent. |
 | `sign-off --receipt RUN_ID approve\|reject [--note TEXT]` | Signs a decision on the receipt of a refused or halted step: approve agrees that the step should have stopped, reject judges the stop wrong. Only the note's hash is sent. |
@@ -76,11 +77,11 @@ The commands and the files are the same in every language: a folder set up by on
 
 ## Check the results offline
 
-Install `verdifax-verify` from [github.com/Verdifax/verdifax-verify](https://github.com/Verdifax/verdifax-verify); it reads every part of these records since v0.27.0. Then, in the folder the program used:
+Install `verdifax-verify` from [github.com/Verdifax/verdifax-verify](https://github.com/Verdifax/verdifax-verify); it reads every part of these records since v0.28.0. Then, in the folder the program used:
 
 ```bash
 verdifax-verify --job records/<job_id>/steps --aivp-traces records/<job_id>/traces
-verdifax-verify --account-policy /path/to/verdifax-claims-review-demo/policy/claims-review-v2.json records/<job_id>/steps/verdict.json
+verdifax-verify --account-policy /path/to/verdifax-claims-review-demo/policy/claims-review-v3.json records/<job_id>/steps/verdict.json
 verdifax-verify --signoff records/<job_id>/signoffs.json --approver-key approver.txt records/<job_id>/steps/verdict.json
 verdifax-verify --signoff-history records/<job_id>/signoff-history.json
 verdifax-verify --signals signals.json

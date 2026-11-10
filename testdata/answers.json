@@ -58,5 +58,14 @@
   "rule-15": {
     "verdict": "pass",
     "reason": "Recorded test answer: nothing in the draft breaks rule 15."
+  },
+  "claims": {
+    "claims": [
+      "The product seals each AI decision into a record.",
+      "Anyone can check a record offline with an open-source verifier."
+    ]
+  },
+  "verdict": {
+    "explanation": "Recorded test explanation: the verdict follows from the rule results, and the draft may go out only if every rule passed."
   }
 }

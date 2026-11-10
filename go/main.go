@@ -57,10 +57,11 @@ const (
 	ruleSet        = "v3"
 	actorID        = "claims-review-agent"
 	routeIntake    = "claims-review/v1/intake"
+	routeClaims    = "claims-review/v1/claims"
 	routeRule      = "claims-review/v1/rule-check"
 	routeVerdict   = "claims-review/v1/verdict"
 	objectPrefix   = "claims-review/v1/"
-	minVerifier    = "v0.27.0"
+	minVerifier    = "v0.28.0"
 	// A stopped step's records live in records/stopped-<run_id>/, and the
 	// model's exact answers in answers/ beside each job's steps/.
 	stoppedFolderPrefix = "stopped-"
@@ -68,8 +69,14 @@ const (
 	// The text the server's AI review checked for each step, as the server
 	// returned it once: a reader re-runs the review's check from these files.
 	tracesFolder = "traces"
-	// The account policy setup activates; v1 stays for records sealed under it.
-	policyFile = "claims-review-v2.json"
+	// The account policy setup activates; v1 and v2 stay for records sealed
+	// under them. v3 requires a reviewed AI answer on every step after the
+	// gate.
+	policyFile = "claims-review-v3.json"
+	// The AI's work on the steps after the gate: listing the draft's claims,
+	// and explaining the verdict code decided.
+	claimsPrompt  = "claims-prompt-v1.txt"
+	verdictPrompt = "verdict-prompt-v1.txt"
 )
 
 var levels = map[string]bool{"PUBLIC": true, "INTERNAL": true, "CONFIDENTIAL": true, "RESTRICTED": true, "TOP_SECRET": true, "TS_SCI": true}
@@ -184,7 +191,9 @@ func loadRules() ([]rule, string) {
 	return typed.Rules, sha256Hex([]byte(canonical(doc)))
 }
 
-func loadPrompt() string { return string(readFile(filepath.Join(repo, "rules", "prompt-v1.txt"))) }
+func loadPrompt() string { return loadPromptFile("prompt-v1.txt") }
+
+func loadPromptFile(name string) string { return string(readFile(filepath.Join(repo, "rules", name))) }
 
 func draftClassification(text string) string {
 	first := strings.TrimSpace(strings.SplitN(text, "\n", 2)[0])
@@ -297,6 +306,99 @@ type recordedAnswer struct {
 	ResponseID string `json:"response_id"`
 	Verdict    string `json:"verdict"`
 	Reason     string `json:"reason"`
+	// Claims and Explanation are the recorded answers of the claims and
+	// verdict steps.
+	Claims      []string `json:"claims"`
+	Explanation string   `json:"explanation"`
+}
+
+// structured is one structured answer from the model: its exact text, which
+// the step sends as its AI output, and where it came from.
+type structured struct {
+	Model, ResponseID, Raw    string
+	InputTokens, OutputTokens int64
+}
+
+// askStructured asks the model for one answer in the JSON schema given. With
+// recorded answers it returns recordedRaw instead. When the model declines,
+// Raw is declined, so the step still carries the model's answer to review.
+func askStructured(ctx context.Context, recorded *recordedAnswer, recordedRaw, prompt, userText, model string, maxTokens int64,
+	schema map[string]any, declined string) (structured, bool) {
+	if recorded != nil {
+		out := structured{Model: recorded.Model, ResponseID: recorded.ResponseID, Raw: recordedRaw}
+		if out.Model == "" {
+			out.Model = "recorded-answers"
+		}
+		if out.ResponseID == "" {
+			out.ResponseID = "recorded"
+		}
+		return out, true
+	}
+	client := anthropic.NewClient()
+	response, callErr := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:        anthropic.Model(model),
+		MaxTokens:    maxTokens,
+		System:       []anthropic.TextBlockParam{{Text: prompt}},
+		Messages:     []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(userText))},
+		OutputConfig: anthropic.OutputConfigParam{Format: anthropic.JSONOutputFormatParam{Schema: schema}},
+	})
+	must(callErr)
+	out := structured{Model: string(response.Model), ResponseID: response.ID,
+		InputTokens: response.Usage.InputTokens, OutputTokens: response.Usage.OutputTokens}
+	for _, block := range response.Content {
+		if block.Type == "text" {
+			out.Raw = block.Text
+			break
+		}
+	}
+	if response.StopReason == anthropic.StopReasonRefusal || out.Raw == "" {
+		if out.Raw == "" {
+			out.Raw = declined
+		}
+		return out, false
+	}
+	return out, true
+}
+
+// askClaims is the draft's claims, as the model listed them.
+func askClaims(ctx context.Context, recorded map[string]recordedAnswer, prompt, userText, model string) (structured, []string) {
+	var rec *recordedAnswer
+	raw := ""
+	if recorded != nil {
+		a := recorded["claims"]
+		rec, raw = &a, canonical(map[string]any{"claims": a.Claims})
+	}
+	schema := map[string]any{"type": "object", "properties": map[string]any{"claims": map[string]any{"type": "array",
+		"items": map[string]any{"type": "string"}}}, "required": []string{"claims"}, "additionalProperties": false}
+	out, ok := askStructured(ctx, rec, raw, prompt, userText, model, 4000, schema, "the model declined to list the claims")
+	var parsed struct {
+		Claims []string `json:"claims"`
+	}
+	if !ok || json.Unmarshal([]byte(out.Raw), &parsed) != nil || parsed.Claims == nil {
+		return out, []string{}
+	}
+	return out, parsed.Claims
+}
+
+// askExplanation is the model's plain-words explanation of the verdict code
+// decided.
+func askExplanation(ctx context.Context, recorded map[string]recordedAnswer, prompt, userText, model string) (structured, string) {
+	var rec *recordedAnswer
+	raw := ""
+	if recorded != nil {
+		a := recorded["verdict"]
+		rec, raw = &a, canonical(map[string]any{"explanation": a.Explanation})
+	}
+	schema := map[string]any{"type": "object", "properties": map[string]any{"explanation": map[string]any{"type": "string"}},
+		"required": []string{"explanation"}, "additionalProperties": false}
+	out, ok := askStructured(ctx, rec, raw, prompt, userText, model, 2000, schema, "the model declined to explain the verdict")
+	var parsed struct {
+		Explanation string `json:"explanation"`
+	}
+	if !ok || json.Unmarshal([]byte(out.Raw), &parsed) != nil {
+		return out, ""
+	}
+	return out, parsed.Explanation
 }
 
 // loadAnswers reads recorded answers for tests, refused against production.
@@ -425,6 +527,42 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string) {
 	answerTexts := map[string]string{}
 	// The text the server's AI review checked, returned once with each step.
 	traceTexts := map[string]string{}
+
+	// The gate passed, so the draft may reach a model. Every step from here
+	// carries the model's answer, which Verdifax's AI review reads and the
+	// record seals; the account policy refuses any step without one.
+	claimsPromptText := loadPromptFile(claimsPrompt)
+	claimsText := "Draft:\n" + draft
+	claimsPromptHash := sha256Hex([]byte(claimsPromptText + "\n" + claimsText))
+	listed, claims := askClaims(ctx, recorded, claimsPromptText, claimsText, model)
+	inputTokens += listed.InputTokens
+	outputTokens += listed.OutputTokens
+	models[listed.Model] = true
+	answerTexts["claims"] = listed.Raw
+	claimsPayload := map[string]any{"form": form, "step": "claims", "draft_sha256": draftHash, "rule_set_hash": ruleSetHash,
+		"model": listed.Model, "model_response_id": listed.ResponseID, "prompt_hash": claimsPromptHash, "claims": claims}
+	claimsStep, claimsErr := job.Step(ctx, "claims", &verdifax.AttestRequest{PayloadText: canonical(claimsPayload), ProgramID: programID,
+		RouteID: routeClaims, RegistryRecordHash: registryRecordHash, AIOutputText: listed.Raw,
+		AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "model_provider": "anthropic", "model_name": listed.Model,
+			"prompt_hash": claimsPromptHash, "decision_kind": "claims.list", "decision_result": fmt.Sprint(len(claims))},
+		PolicyContext: policyContext("claims", level)}, verdifax.WithAfter("intake"))
+	if errors.As(claimsErr, &apiErr) {
+		payloads["claims"] = claimsPayload
+		if apiErr.AivpTraceText != "" {
+			traceTexts["claims"] = apiErr.AivpTraceText
+		}
+		stop(ctx, agent, jobID, "claims", runIDs, payloads, answerTexts, draftPath, draftHash, apiErr, model, inputTokens, outputTokens, models,
+			traceTexts)
+		return
+	}
+	must(claimsErr)
+	if claimsStep.AivpTraceText != "" {
+		traceTexts["claims"] = claimsStep.AivpTraceText
+	}
+	payloads["claims"] = claimsPayload
+	runIDs["claims"] = claimsStep.RunID
+	fmt.Printf("claims: %d listed\n", len(claims))
+
 	ruleIDs := make([]string, 0, len(rules))
 	for _, r := range rules {
 		ruleIDs = append(ruleIDs, r.ID)
@@ -446,7 +584,7 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string) {
 			RouteID: routeRule, RegistryRecordHash: registryRecordHash, AIOutputText: aiText,
 			AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "model_provider": "anthropic", "model_name": a.Model,
 				"prompt_hash": promptHash, "decision_kind": "claims.rule_check", "decision_result": a.Verdict},
-			PolicyContext: policyContext(r.ID, level)}, verdifax.WithAfter("intake"))
+			PolicyContext: policyContext(r.ID, level)}, verdifax.WithAfter("claims"))
 		if errors.As(stepErr, &apiErr) {
 			// The account policy, the server's content screen or its review
 			// of the model's answer stopped this step, so the job stops here:
@@ -480,15 +618,43 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string) {
 	if len(failed) > 0 {
 		verdict = "fail"
 	}
+	// The program decides the verdict from the rule answers, so anyone can
+	// decide it again from the sealed records; the model only explains it.
+	verdictPromptText := loadPromptFile(verdictPrompt)
+	if results == nil {
+		results = []map[string]any{}
+	}
+	verdictText := fmt.Sprintf("Verdict: %s\n\nRule results:\n%s", verdict, canonical(results))
+	verdictPromptHash := sha256Hex([]byte(verdictPromptText + "\n" + verdictText))
+	explained, explanation := askExplanation(ctx, recorded, verdictPromptText, verdictText, model)
+	inputTokens += explained.InputTokens
+	outputTokens += explained.OutputTokens
+	models[explained.Model] = true
+	answerTexts["verdict"] = explained.Raw
 	verdictPayload := map[string]any{"form": form, "step": "verdict", "draft_sha256": draftHash, "rule_set_hash": ruleSetHash,
-		"verdict": verdict, "failed_rules": failed, "results": results}
+		"verdict": verdict, "failed_rules": failed, "results": results, "model": explained.Model,
+		"model_response_id": explained.ResponseID, "prompt_hash": verdictPromptHash, "explanation": explanation}
 	final, finalErr := job.Step(ctx, "verdict", &verdifax.AttestRequest{PayloadText: canonical(verdictPayload), ProgramID: programID,
-		RouteID: routeVerdict, RegistryRecordHash: registryRecordHash,
-		AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "decision_kind": "claims.verdict", "decision_result": verdict},
-		PolicyContext:   policyContext("verdict", level)}, verdifax.WithAfter(ruleIDs...), verdifax.WithFinal())
+		RouteID: routeVerdict, RegistryRecordHash: registryRecordHash, AIOutputText: explained.Raw,
+		AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "model_provider": "anthropic", "model_name": explained.Model,
+			"prompt_hash": verdictPromptHash, "decision_kind": "claims.verdict", "decision_result": verdict},
+		PolicyContext: policyContext("verdict", level)}, verdifax.WithAfter(ruleIDs...), verdifax.WithFinal())
+	if errors.As(finalErr, &apiErr) {
+		payloads["verdict"] = verdictPayload
+		if apiErr.AivpTraceText != "" {
+			traceTexts["verdict"] = apiErr.AivpTraceText
+		}
+		stop(ctx, agent, jobID, "verdict", runIDs, payloads, answerTexts, draftPath, draftHash, apiErr, model, inputTokens, outputTokens, models,
+			traceTexts)
+		return
+	}
 	must(finalErr)
+	if final.AivpTraceText != "" {
+		traceTexts["verdict"] = final.AivpTraceText
+	}
 	payloads["verdict"] = verdictPayload
 	runIDs["verdict"] = final.RunID
+	fmt.Printf("verdict explained: %s\n", explanation)
 
 	saveJobRecords(ctx, agent, jobID, out, runIDs, payloads)
 	saveAnswers(out, answerTexts)

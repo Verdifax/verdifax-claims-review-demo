@@ -40,11 +40,12 @@ FORM <- "verdifax.claims-review.v1"
 RULE_SET <- "v3"
 ACTOR_ID <- "claims-review-agent"
 ROUTE_INTAKE <- "claims-review/v1/intake"
+ROUTE_CLAIMS <- "claims-review/v1/claims"
 ROUTE_RULE <- "claims-review/v1/rule-check"
 ROUTE_VERDICT <- "claims-review/v1/verdict"
 OBJECT_PREFIX <- "claims-review/v1/"
 LEVELS <- c("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
-MIN_VERIFIER <- "v0.27.0"
+MIN_VERIFIER <- "v0.28.0"
 # A stopped step's records live in records/stopped-<run_id>/, and the
 # model's exact answers in answers/ beside each job's steps/.
 STOPPED_FOLDER_PREFIX <- "stopped-"
@@ -53,7 +54,11 @@ ANSWERS_FOLDER <- "answers"
 # returned it once: a reader re-runs the review's check from these files.
 TRACES_FOLDER <- "traces"
 # The account policy setup activates; v1 stays for records sealed under it.
-POLICY_FILE <- "claims-review-v2.json"
+POLICY_FILE <- "claims-review-v3.json"
+# The AI's work on the steps after the gate: listing the draft's claims, and
+# explaining the verdict code decided.
+CLAIMS_PROMPT <- "claims-prompt-v1.txt"
+VERDICT_PROMPT <- "verdict-prompt-v1.txt"
 
 script_dir <- function() {
   args <- commandArgs(trailingOnly = FALSE)
@@ -123,9 +128,9 @@ load_rules <- function() {
   doc <- jsonlite::fromJSON(file.path(REPO, "rules", paste0(RULE_SET, ".json")), simplifyVector = FALSE)
   list(rules = doc$rules, rule_set_hash = sha256_hex(canonical(doc)))
 }
-load_prompt <- function() {
+load_prompt <- function(name = "prompt-v1.txt") {
   # The exact bytes of the prompt file, so its hash matches every language.
-  readChar(file.path(REPO, "rules", "prompt-v1.txt"), file.info(file.path(REPO, "rules", "prompt-v1.txt"))$size, useBytes = TRUE)
+  readChar(file.path(REPO, "rules", name), file.info(file.path(REPO, "rules", name))$size, useBytes = TRUE)
 }
 
 draft_classification <- function(text) {
@@ -220,6 +225,57 @@ ask <- function(recorded, prompt, user_text, rule_id, model) {
   c(list(model = parsed$model, response_id = parsed$id, verdict = verdict, reason = answer$reason, raw = raw), usage)
 }
 
+# ask_structured asks the model for one answer in the JSON schema given. With
+# a recorded answer it returns recorded_raw instead. When the model declines,
+# raw is declined, so the step still carries the model's answer to review.
+ask_structured <- function(recorded_entry, recorded_raw, prompt, user_text, model, max_tokens, schema, declined) {
+  if (!is.null(recorded_entry)) {
+    return(list(model = if (is.null(recorded_entry$model)) "recorded-answers" else recorded_entry$model,
+                response_id = if (is.null(recorded_entry$response_id)) "recorded" else recorded_entry$response_id,
+                raw = recorded_raw, ok = TRUE, input_tokens = 0L, output_tokens = 0L))
+  }
+  key <- Sys.getenv("ANTHROPIC_API_KEY", "")
+  if (key == "") fail("set ANTHROPIC_API_KEY to call the model")
+  body <- list(model = model, max_tokens = as.integer(max_tokens), system = prompt,
+               messages = list(list(role = "user", content = user_text)),
+               output_config = list(format = list(type = "json_schema", schema = schema)))
+  req <- httr2::request(paste0(sub("/+$", "", Sys.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")), "/v1/messages"))
+  req <- httr2::req_headers(req, `x-api-key` = key, `anthropic-version` = "2026-10-21", `content-type` = "application/json")
+  req <- httr2::req_body_json(req, body, auto_unbox = TRUE)
+  req <- httr2::req_timeout(req, 600)
+  parsed <- jsonlite::fromJSON(httr2::resp_body_string(httr2::req_perform(req)), simplifyVector = FALSE)
+  text_blocks <- Filter(function(b) identical(b$type, "text"), parsed$content)
+  raw <- if (length(text_blocks) > 0) text_blocks[[1]]$text else ""
+  ok <- !identical(parsed$stop_reason, "refusal") && nzchar(raw)
+  list(model = parsed$model, response_id = parsed$id, raw = if (nzchar(raw)) raw else declined, ok = ok,
+       input_tokens = as.integer(parsed$usage$input_tokens), output_tokens = as.integer(parsed$usage$output_tokens))
+}
+
+# The draft's claims, as the model listed them.
+ask_claims <- function(recorded, prompt, user_text, model) {
+  entry <- if (is.null(recorded)) NULL else recorded[["claims"]]
+  recorded_raw <- if (is.null(entry)) "" else canonical(list(claims = as_list(unlist(entry$claims))))
+  schema <- list(type = "object", properties = list(claims = list(type = "array", items = list(type = "string"))),
+                 required = list("claims"), additionalProperties = FALSE)
+  out <- ask_structured(entry, recorded_raw, prompt, user_text, model, 4000L, schema, "the model declined to list the claims")
+  answer <- if (out$ok) tryCatch(jsonlite::fromJSON(out$raw, simplifyVector = FALSE), error = function(e) NULL) else NULL
+  out$claims <- if (is.null(answer) || is.null(answer$claims)) character(0) else unlist(answer$claims)
+  if (is.null(out$claims)) out$claims <- character(0)
+  out
+}
+
+# The model's plain-words explanation of the verdict code decided.
+ask_explanation <- function(recorded, prompt, user_text, model) {
+  entry <- if (is.null(recorded)) NULL else recorded[["verdict"]]
+  recorded_raw <- if (is.null(entry)) "" else canonical(list(explanation = entry$explanation))
+  schema <- list(type = "object", properties = list(explanation = list(type = "string")),
+                 required = list("explanation"), additionalProperties = FALSE)
+  out <- ask_structured(entry, recorded_raw, prompt, user_text, model, 2000L, schema, "the model declined to explain the verdict")
+  answer <- if (out$ok) tryCatch(jsonlite::fromJSON(out$raw, simplifyVector = FALSE), error = function(e) NULL) else NULL
+  out$explanation <- if (is.null(answer) || is.null(answer$explanation)) "" else answer$explanation
+  out
+}
+
 measured_cost <- function(model, input_tokens, output_tokens) {
   prices <- jsonlite::fromJSON(file.path(REPO, "rules", "model-prices-v1.json"), simplifyVector = FALSE)$prices
   if (is.null(prices[[model]])) return(NULL)
@@ -273,6 +329,41 @@ cmd_review <- function(draft_path, model, answers_path) {
   answer_texts <- list()
   # The text the server's AI review checked, returned once with each step.
   trace_texts <- list()
+
+  # The gate passed, so the draft may reach a model. Every step from here
+  # carries the model's answer, which Verdifax's AI review reads and the
+  # record seals; the account policy refuses any step without one.
+  claims_prompt <- load_prompt(CLAIMS_PROMPT)
+  claims_text <- paste0("Draft:\n", draft)
+  claims_prompt_hash <- sha256_hex(paste0(claims_prompt, "\n", claims_text))
+  listed <- ask_claims(recorded, claims_prompt, claims_text, model)
+  tokens$input <- tokens$input + listed$input_tokens
+  tokens$output <- tokens$output + listed$output_tokens
+  models <- union(models, listed$model)
+  answer_texts[["claims"]] <- listed$raw
+  claims_payload <- list(form = FORM, step = "claims", draft_sha256 = draft_hash, rule_set_hash = rule_set_hash,
+                         model = listed$model, model_response_id = listed$response_id, prompt_hash = claims_prompt_hash,
+                         claims = as_list(listed$claims))
+  claims_step <- tryCatch(
+    verdifax_job_step(job, "claims", after = list("intake"), payload = canonical(claims_payload), program_id = PROGRAM_ID,
+                      route_id = ROUTE_CLAIMS, registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = listed$raw,
+                      attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
+                                              model_name = listed$model, prompt_hash = claims_prompt_hash,
+                                              decision_kind = "claims.list", decision_result = as.character(length(listed$claims))),
+                      policy_context = policy_context("claims", level)),
+    httr2_http = function(e) e)
+  if (inherits(claims_step, "error")) {
+    payloads$claims <- claims_payload
+    if (!is.null(claims_step$aivp_trace_text)) trace_texts[["claims"]] <- claims_step$aivp_trace_text
+    stop_job(agent, job_id, "claims", run_ids, payloads, answer_texts, draft_path, draft_hash, claims_step, model, tokens, models,
+             trace_texts)
+    return(invisible(NULL))
+  }
+  if (!is.null(claims_step$aivp_trace_text)) trace_texts[["claims"]] <- claims_step$aivp_trace_text
+  payloads$claims <- claims_payload
+  run_ids$claims <- claims_step$run_id
+  cat(sprintf("claims: %d listed\n", length(listed$claims)))
+
   for (rule in rules) {
     user_text <- sprintf("Rule %s: %s\n\nDraft:\n%s", rule$id, rule$text, draft)
     prompt_hash <- sha256_hex(paste0(prompt, "\n", user_text))
@@ -286,7 +377,7 @@ cmd_review <- function(draft_path, model, answers_path) {
     ai_text <- if (nzchar(answer$raw)) answer$raw else answer$reason
     answer_texts[[rule$id]] <- ai_text
     receipt <- tryCatch(
-      verdifax_job_step(job, rule$id, after = list("intake"), payload = canonical(payload), program_id = PROGRAM_ID,
+      verdifax_job_step(job, rule$id, after = list("claims"), payload = canonical(payload), program_id = PROGRAM_ID,
                         route_id = ROUTE_RULE, registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = ai_text,
                         attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
                                                 model_name = answer$model, prompt_hash = prompt_hash,
@@ -314,16 +405,40 @@ cmd_review <- function(draft_path, model, answers_path) {
   failed <- unlist(lapply(results, function(r) if (r$verdict != "pass") r$rule_id else NULL))
   if (is.null(failed)) failed <- character(0)
   verdict <- if (length(failed) == 0) "pass" else "fail"
+  # The program decides the verdict from the rule answers, so anyone can
+  # decide it again from the sealed records; the model only explains it.
+  verdict_prompt <- load_prompt(VERDICT_PROMPT)
+  verdict_text <- sprintf("Verdict: %s\n\nRule results:\n%s", verdict, canonical(results))
+  verdict_prompt_hash <- sha256_hex(paste0(verdict_prompt, "\n", verdict_text))
+  explained <- ask_explanation(recorded, verdict_prompt, verdict_text, model)
+  tokens$input <- tokens$input + explained$input_tokens
+  tokens$output <- tokens$output + explained$output_tokens
+  models <- union(models, explained$model)
+  answer_texts[["verdict"]] <- explained$raw
   verdict_payload <- list(form = FORM, step = "verdict", draft_sha256 = draft_hash, rule_set_hash = rule_set_hash,
-                          verdict = verdict, failed_rules = as_list(failed), results = results)
-  final <- verdifax_job_step(job, "verdict", after = as_list(vapply(rules, function(r) r$id, character(1))), final = TRUE,
-                             payload = canonical(verdict_payload), program_id = PROGRAM_ID, route_id = ROUTE_VERDICT,
-                             registry_record_hash = REGISTRY_RECORD_HASH,
-                             attested_context = list(attested = TRUE, actor_id = ACTOR_ID, decision_kind = "claims.verdict",
-                                                     decision_result = verdict),
-                             policy_context = policy_context("verdict", level))
+                          verdict = verdict, failed_rules = as_list(failed), results = results, model = explained$model,
+                          model_response_id = explained$response_id, prompt_hash = verdict_prompt_hash,
+                          explanation = explained$explanation)
+  final <- tryCatch(
+    verdifax_job_step(job, "verdict", after = as_list(vapply(rules, function(r) r$id, character(1))), final = TRUE,
+                      payload = canonical(verdict_payload), program_id = PROGRAM_ID, route_id = ROUTE_VERDICT,
+                      registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = explained$raw,
+                      attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
+                                              model_name = explained$model, prompt_hash = verdict_prompt_hash,
+                                              decision_kind = "claims.verdict", decision_result = verdict),
+                      policy_context = policy_context("verdict", level)),
+    httr2_http = function(e) e)
+  if (inherits(final, "error")) {
+    payloads$verdict <- verdict_payload
+    if (!is.null(final$aivp_trace_text)) trace_texts[["verdict"]] <- final$aivp_trace_text
+    stop_job(agent, job_id, "verdict", run_ids, payloads, answer_texts, draft_path, draft_hash, final, model, tokens, models,
+             trace_texts)
+    return(invisible(NULL))
+  }
+  if (!is.null(final$aivp_trace_text)) trace_texts[["verdict"]] <- final$aivp_trace_text
   payloads$verdict <- verdict_payload
   run_ids$verdict <- final$run_id
+  cat(sprintf("verdict explained: %s\n", explained$explanation))
 
   save_job_records(agent, job_id, out, run_ids, payloads)
   save_answers(out, answer_texts)

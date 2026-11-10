@@ -53,14 +53,17 @@ jobs:
       - run: go test -count=1 ./...
         working-directory: go
   r:
-    runs-on: ubuntu-latest
+    # The release the dated snapshot's packages are built for (noble).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2.14.0
         with:
           r-version: "4.5"
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq libsodium-dev libcurl4-openssl-dev libssl-dev
-      - run: Rscript -e 'install.packages(c("jsonlite", "openssl", "httr2", "sodium"), repos = "https://cloud.r-project.org")'
+      # Packages from the same dated snapshot the R SDK's CI and Verdifax's
+      # readiness check use, so every build installs the same versions.
+      - run: Rscript -e 'options(repos = c(CRAN = "https://packagemanager.posit.co/cran/__linux__/noble/2026-10-25")); install.packages(c("jsonlite", "openssl", "httr2", "sodium"))'
       # The verdifax R SDK at the release the demo is written against; the
       # tag is held equal to the SDK's version by Verdifax's checks (R139).
       - run: curl -sSL -o verdifax-sdk-r.tar.gz https://github.com/Verdifax/verdifax-sdk-r/archive/refs/tags/v1.9.0.tar.gz && tar xzf verdifax-sdk-r.tar.gz && R CMD INSTALL verdifax-sdk-r-1.9.0

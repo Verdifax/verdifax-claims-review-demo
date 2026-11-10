@@ -1,5 +1,6 @@
 """Unit tests for the Python program: the same cases every language tests."""
 
+import hashlib
 import json
 import pathlib
 import types
@@ -129,3 +130,18 @@ class StopHandling(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InputBytes(unittest.TestCase):
+    """R170: the program reads every input as its exact bytes, so the hash it
+    seals is the one shasum prints, and the parity file lists every sample
+    and policy."""
+
+    def test_every_input_file_reads_as_its_exact_bytes(self):
+        repo = HERE.parent
+        listed = sorted(PARITY["input_sha256"])
+        on_disk = sorted("%s/%s" % (d, p.name) for d in ("samples", "policy") for p in (repo / d).iterdir())
+        self.assertEqual(listed, on_disk)
+        for name in listed:
+            read = hashlib.sha256(cr.read_input(repo / name).encode("utf-8")).hexdigest()
+            self.assertEqual(read, PARITY["input_sha256"][name], name)

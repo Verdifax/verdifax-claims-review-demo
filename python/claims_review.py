@@ -70,6 +70,12 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 
 
+def read_input(path):
+    """A file's exact bytes as text. Text mode would turn Windows line endings
+    into newlines and change the draft's sealed hash (R170)."""
+    return Path(path).read_bytes().decode("utf-8")
+
+
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -155,7 +161,7 @@ def cmd_setup(_: argparse.Namespace) -> None:
     member_signer = verdifax.generate_request_key()
     agent = verdifax.VerdifaxClient(base_url=base_url(), api_key=member["secret"], signing_key=member_signer.private_key)
     agent.register_request_key()
-    policy_text = (REPO / "policy" / POLICY_FILE).read_text(encoding="utf-8")
+    policy_text = read_input(REPO / "policy" / POLICY_FILE)
     uploaded = owner.upload_account_policy(policy_text)
     owner.activate_account_policy(uploaded["document_hash"])
     approver = verdifax.generate_request_key()
@@ -227,7 +233,7 @@ def cmd_review(args: argparse.Namespace) -> None:
     rules, rule_set_hash = load_rules()
     prompt = load_prompt()
     draft_path = Path(args.draft)
-    draft = draft_path.read_text(encoding="utf-8")
+    draft = read_input(draft_path)
     draft_hash = sha256_hex(draft.encode("utf-8"))
     level = draft_classification(draft)
     answers = Answers(args.answers)

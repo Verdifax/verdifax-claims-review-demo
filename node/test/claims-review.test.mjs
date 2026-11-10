@@ -1,11 +1,12 @@
 // Unit tests for the Node program: the same cases every language tests.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  canonical, draftClassification, loadRules, RULE_SET, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun,
+  canonical, draftClassification, loadRules, readInput, RULE_SET, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun,
 } from "../claims-review.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -94,4 +95,17 @@ test("a stop's receipt hash is read from the receipt of its kind", async () => {
 test("a run that did not stop has no receipt", async (t) => {
   catchFail(t);
   await assert.rejects(stopReceiptHash(fakeAgent(), STOPS.not_stopped.run_id), { message: `exit 1: ${STOPS.not_stopped.failure}` });
+});
+
+// R170: the program reads every input as its exact bytes, so the hash it seals
+// is the one shasum prints, and the parity file lists every sample and policy.
+test("every input file reads as its exact bytes", () => {
+  const repo = join(HERE, "..", "..");
+  const listed = Object.keys(PARITY.input_sha256).sort();
+  const onDisk = ["samples", "policy"].flatMap((dir) => readdirSync(join(repo, dir)).map((f) => `${dir}/${f}`)).sort();
+  assert.deepEqual(listed, onDisk);
+  for (const file of listed) {
+    const read = createHash("sha256").update(Buffer.from(readInput(join(repo, file)), "utf8")).digest("hex");
+    assert.equal(read, PARITY.input_sha256[file], file);
+  }
 });

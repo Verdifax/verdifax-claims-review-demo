@@ -66,3 +66,11 @@ read <- vapply(stops$receipts, function(c) {
 check(all(read), "a stop's receipt hash is read from the receipt of its kind")
 
 check(identical(failure_of(stop_receipt_hash(NULL, stops$not_stopped$run_id)), stops$not_stopped$failure), "a run that did not stop has no receipt")
+
+# R170: the program reads every input as its exact bytes, so the hash it seals
+# is the one shasum prints, and the parity file lists every sample and policy.
+listed <- sort(names(parity$input_sha256))
+on_disk <- sort(c(paste0("samples/", list.files(file.path(REPO, "samples"))), paste0("policy/", list.files(file.path(REPO, "policy")))))
+check(identical(listed, on_disk), "the parity file lists every sample and policy file")
+read_ok <- vapply(listed, function(f) identical(sha256_hex(read_text(file.path(REPO, f))), parity$input_sha256[[f]]), logical(1))
+check(all(read_ok), "every input file reads as its exact bytes")

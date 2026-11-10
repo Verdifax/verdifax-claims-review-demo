@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -243,5 +245,45 @@ func TestARunThatDidNotStopHasNoReceipt(t *testing.T) {
 	message := catchFail(t, func() { stopReceiptHash(context.Background(), fakeStopServer{cases}, cases.NotStopped.RunID) })
 	if message != cases.NotStopped.Failure {
 		t.Fatalf("fail printed %q, want %q", message, cases.NotStopped.Failure)
+	}
+}
+
+// R170: the program reads every input as its exact bytes, so the hash it
+// seals is the one shasum prints, and the parity file lists every sample and
+// policy.
+func TestEveryInputFileReadsAsItsExactBytes(t *testing.T) {
+	text, readErr := os.ReadFile(filepath.Join(repo, "demo-parity.json"))
+	if readErr != nil {
+		t.Fatalf("read demo-parity.json: %v", readErr)
+	}
+	var parity struct {
+		InputSHA256 map[string]string `json:"input_sha256"`
+	}
+	if parseErr := json.Unmarshal(text, &parity); parseErr != nil {
+		t.Fatalf("parse demo-parity.json: %v", parseErr)
+	}
+	var listed, onDisk []string
+	for name := range parity.InputSHA256 {
+		listed = append(listed, name)
+	}
+	for _, dir := range []string{"samples", "policy"} {
+		entries, dirErr := os.ReadDir(filepath.Join(repo, dir))
+		if dirErr != nil {
+			t.Fatalf("read %s: %v", dir, dirErr)
+		}
+		for _, entry := range entries {
+			onDisk = append(onDisk, dir+"/"+entry.Name())
+		}
+	}
+	sort.Strings(listed)
+	sort.Strings(onDisk)
+	if !reflect.DeepEqual(listed, onDisk) {
+		t.Fatalf("demo-parity.json lists %v; samples and policy hold %v", listed, onDisk)
+	}
+	for _, name := range listed {
+		sum := sha256.Sum256(readFile(filepath.Join(repo, name)))
+		if got := hex.EncodeToString(sum[:]); got != parity.InputSHA256[name] {
+			t.Fatalf("%s reads as %s, demo-parity.json names %s", name, got, parity.InputSHA256[name])
+		}
 	}
 }

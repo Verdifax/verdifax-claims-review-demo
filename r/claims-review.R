@@ -95,7 +95,15 @@ fail <- function(message) {
   quit(status = 1)
 }
 
-read_text <- function(path) paste(readLines(path, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
+# A file's exact bytes as UTF-8 text: readLines would drop the final newline
+# and change the draft's sealed hash (R170).
+read_text <- function(path) {
+  size <- file.info(path)$size
+  if (is.na(size) || size == 0) return("")
+  text <- readChar(path, size, useBytes = TRUE)
+  Encoding(text) <- "UTF-8"
+  text
+}
 write_text <- function(path, text) {
   dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
   writeLines(enc2utf8(text), path, useBytes = TRUE, sep = "")

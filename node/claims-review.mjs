@@ -88,6 +88,12 @@ function loadRules() {
 
 const loadPrompt = () => readFileSync(join(REPO, "rules", "prompt-v1.txt"), "utf8");
 
+// A file's exact bytes as UTF-8 text, so a sealed draft or policy hash
+// matches the file (R170).
+function readInput(path) {
+  return readFileSync(path).toString("utf8");
+}
+
 function writePrivate(path, text) {
   writeFileSync(path, text, { mode: 0o600, flag: "w" });
 }
@@ -126,7 +132,7 @@ async function cmdSetup() {
   const memberSigner = generateRequestKeyPair();
   const agent = new VerdifaxClient({ baseURL: baseURL(), apiKey: member.secret, signingKey: memberSigner.privateKey });
   await agent.registerRequestKey();
-  const policyText = readFileSync(join(REPO, "policy", POLICY_FILE), "utf8");
+  const policyText = readInput(join(REPO, "policy", POLICY_FILE));
   const uploaded = await owner.uploadAccountPolicy(policyText);
   await owner.activateAccountPolicy(uploaded.document_hash);
   const approver = generateRequestKeyPair();
@@ -213,7 +219,7 @@ async function cmdReview(draftPath, model, answersPath) {
   const agent = clientFor(keys.agent);
   const { rules, ruleSetHash } = loadRules();
   const prompt = loadPrompt();
-  const draft = readFileSync(draftPath, "utf8");
+  const draft = readInput(draftPath);
   const draftHash = sha256Hex(draft);
   const level = draftClassification(draft);
   const recorded = loadAnswers(answersPath);
@@ -598,7 +604,7 @@ async function main() {
   }
 }
 
-export { canonical, draftClassification, loadRules, RULE_SET, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun };
+export { canonical, draftClassification, loadRules, readInput, RULE_SET, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun };
 
 // Node loads the program by its real path, so the path it was started with is
 // compared as a real path too: through a linked folder (macOS's /tmp is one)

@@ -19,6 +19,9 @@ permissions:
 jobs:
   python:
     runs-on: ubuntu-latest
+    # A hung job fails here, not at GitHub's default limit: about three times
+    # its longest recent run (0.4 min) (round 57).
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -29,6 +32,9 @@ jobs:
       - run: python -m unittest discover -s python -p "test_*.py" -v
   node:
     runs-on: ubuntu-latest
+    # A hung job fails here, not at GitHub's default limit: about three times
+    # its longest recent run (0.2 min) (round 57).
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -42,6 +48,9 @@ jobs:
         working-directory: node
   go:
     runs-on: ubuntu-latest
+    # A hung job fails here, not at GitHub's default limit: about three times
+    # its longest recent run (1.1 min) (round 57).
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -55,6 +64,9 @@ jobs:
   r:
     # The release the dated snapshot's packages are built for (noble).
     runs-on: ubuntu-24.04
+    # A hung job fails here, not at GitHub's default limit: about three times
+    # its longest recent run (0.8 min) (round 57).
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2.14.0

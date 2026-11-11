@@ -55,7 +55,7 @@ CLAIMS_REVIEW_REPO=/path/to/verdifax-claims-review-demo /path/to/verdifax-claims
 
 ```bash
 # R 4.3 or later
-Rscript -e 'install.packages(c("remotes", "sodium")); remotes::install_github("Verdifax/verdifax-sdk-r@v1.10.0")'
+Rscript -e 'install.packages(c("remotes", "sodium")); remotes::install_github("Verdifax/verdifax-sdk-r@v1.11.0")'
 Rscript /path/to/verdifax-claims-review-demo/r/claims-review.R setup
 Rscript /path/to/verdifax-claims-review-demo/r/claims-review.R review draft.md
 ```

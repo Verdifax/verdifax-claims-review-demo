@@ -105,7 +105,19 @@ function writePrivate(path, text) {
 
 function writeJSON(path, value) {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(value, null, 2) + "\n");
+  writeFileSync(path, exactText(value) + "\n");
+}
+
+// A value the SDK read from the server keeps the server's exact text in
+// sealedJson (SDK 1.11.0), so a saved record is the record the server sent,
+// every digit included; a list of such records is joined from their texts.
+// Anything this program builds itself is written as JSON.
+function exactText(value) {
+  if (value && typeof value.sealedJson === "string") return value.sealedJson;
+  if (Array.isArray(value) && value.length > 0 && value.every((v) => v && typeof v.sealedJson === "string")) {
+    return "[" + value.map((v) => v.sealedJson).join(",") + "]";
+  }
+  return JSON.stringify(value, null, 2);
 }
 
 function draftClassification(text) {

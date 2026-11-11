@@ -1,6 +1,6 @@
 module github.com/Verdifax/verdifax-claims-review-demo/go
 
-go 1.27.1
+go 1.27.4
 
 require (
 	github.com/Verdifax/verdifax-sdk-go v1.11.0

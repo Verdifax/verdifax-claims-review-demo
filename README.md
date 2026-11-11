@@ -47,7 +47,7 @@ node /path/to/verdifax-claims-review-demo/node/claims-review.mjs review draft.md
 ```
 
 ```bash
-# Go 1.27.1 or later
+# Go 1.27.4 or later
 (cd /path/to/verdifax-claims-review-demo/go && go build -o claims-review .)
 CLAIMS_REVIEW_REPO=/path/to/verdifax-claims-review-demo /path/to/verdifax-claims-review-demo/go/claims-review setup
 CLAIMS_REVIEW_REPO=/path/to/verdifax-claims-review-demo /path/to/verdifax-claims-review-demo/go/claims-review review draft.md

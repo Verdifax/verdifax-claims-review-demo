@@ -207,10 +207,7 @@ ask <- function(recorded, prompt, user_text, rule_id, model) {
       properties = list(verdict = list(type = "string"), reason = list(type = "string")),
       required = list("verdict", "reason"), additionalProperties = FALSE)))
   )
-  req <- httr2::request(paste0(sub("/+$", "", Sys.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")), "/v1/messages"))
-  req <- httr2::req_headers(req, `x-api-key` = key, `anthropic-version` = "2026-10-21", `content-type` = "application/json")
-  req <- httr2::req_body_json(req, body, auto_unbox = TRUE)
-  req <- httr2::req_timeout(req, 600)
+  req <- model_request(body, key)
   resp <- httr2::req_perform(req)
   parsed <- jsonlite::fromJSON(httr2::resp_body_string(resp), simplifyVector = FALSE)
   usage <- list(input_tokens = as.integer(parsed$usage$input_tokens), output_tokens = as.integer(parsed$usage$output_tokens))
@@ -223,6 +220,26 @@ ask <- function(recorded, prompt, user_text, rule_id, model) {
   }
   verdict <- if (answer$verdict %in% c("pass", "fail")) answer$verdict else "unanswered"
   c(list(model = parsed$model, response_id = parsed$id, verdict = verdict, reason = answer$reason, raw = raw), usage)
+}
+
+# model_request builds one call to the model's Messages API. Python, Node and
+# Go call the model through Anthropic's official SDKs, which retry a
+# temporary failure (a dropped connection, 408, 409, 429 or any 5xx, such as
+# 529 overloaded) twice with growing waits and honor Retry-After. There is no
+# official R SDK, so this request carries the same retry policy; without it
+# one temporary error stopped the R demo where the other languages carry on.
+MODEL_TRANSIENT_STATUS <- c(408L, 409L, 429L)
+model_transient <- function(resp) {
+  status <- httr2::resp_status(resp)
+  status %in% MODEL_TRANSIENT_STATUS || status >= 500L
+}
+model_request <- function(body, key) {
+  req <- httr2::request(paste0(sub("/+$", "", Sys.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")), "/v1/messages"))
+  req <- httr2::req_headers(req, `x-api-key` = key, `anthropic-version` = "2026-10-21", `content-type` = "application/json")
+  req <- httr2::req_body_json(req, body, auto_unbox = TRUE)
+  req <- httr2::req_timeout(req, 600)
+  httr2::req_retry(req, max_tries = 3, retry_on_failure = TRUE, is_transient = model_transient,
+                   backoff = function(attempt) min(60, 2^attempt))
 }
 
 # ask_structured asks the model for one answer in the JSON schema given. With
@@ -239,10 +256,7 @@ ask_structured <- function(recorded_entry, recorded_raw, prompt, user_text, mode
   body <- list(model = model, max_tokens = as.integer(max_tokens), system = prompt,
                messages = list(list(role = "user", content = user_text)),
                output_config = list(format = list(type = "json_schema", schema = schema)))
-  req <- httr2::request(paste0(sub("/+$", "", Sys.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")), "/v1/messages"))
-  req <- httr2::req_headers(req, `x-api-key` = key, `anthropic-version` = "2026-10-21", `content-type` = "application/json")
-  req <- httr2::req_body_json(req, body, auto_unbox = TRUE)
-  req <- httr2::req_timeout(req, 600)
+  req <- model_request(body, key)
   parsed <- jsonlite::fromJSON(httr2::resp_body_string(httr2::req_perform(req)), simplifyVector = FALSE)
   text_blocks <- Filter(function(b) identical(b$type, "text"), parsed$content)
   raw <- if (length(text_blocks) > 0) text_blocks[[1]]$text else ""

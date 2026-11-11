@@ -21,6 +21,16 @@ source_text <- readChar(file.path(REPO, "demo-parity.json"), file.info(file.path
 copy_text <- readChar(file.path(here, "testdata", "demo-parity.json"), file.info(file.path(here, "testdata", "demo-parity.json"))$size, useBytes = TRUE)
 check(identical(source_text, copy_text), "the parity copy matches the source")
 
+# The model call retries a temporary failure as the official SDKs the other
+# three languages use do (round 58: one temporary error stopped the R demo in
+# a readiness run while Python, Node and Go would have retried).
+req <- model_request(list(model = "m", max_tokens = 1L), "k")
+check(identical(req$policies$retry_max_tries, 3) && isTRUE(req$policies$retry_on_failure),
+      "the model call retries twice, after a dropped connection too")
+transient <- vapply(c(408L, 409L, 429L, 500L, 503L, 529L), function(code) model_transient(httr2::response(status_code = code)), TRUE)
+permanent <- vapply(c(400L, 401L, 403L, 404L, 422L), function(code) model_transient(httr2::response(status_code = code)), TRUE)
+check(all(transient) && !any(permanent), "only a temporary model error is retried")
+
 # The stop cases every language runs, from one file (R152). The test answers
 # as the server would from stop-cases.json: each receipt route serves only
 # runs stopped by its own kind, so a fetch of the wrong kind fails the test.

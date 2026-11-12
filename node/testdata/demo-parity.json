@@ -25,11 +25,15 @@
       "writes": [
         "records/<job_id>/steps/<step>.json (the sealed records, the folder verdifax-verify --job reads)",
         "records/<job_id>/payloads/<step>.json",
+        "records/<job_id>/answers/<step>.txt (the model's exact answer, which hashes to the step's sealed ai_output_hash)",
+        "records/<job_id>/traces/<step>.txt (the text the server's AI review checked, when the server returned it)",
         "records/<job_id>/job.json",
-        "records/refused-<run_id>/receipt.json",
-        "records/refused-<run_id>/steps/<step>.json (every step sealed before the refusal)",
-        "records/refused-<run_id>/payloads/<step>.json (every step, the refused one included)",
-        "records/refused-<run_id>/job.json"
+        "records/stopped-<run_id>/receipt.json",
+        "records/stopped-<run_id>/steps/<step>.json (every step sealed before the stop)",
+        "records/stopped-<run_id>/payloads/<step>.json (every step, the stopped one included)",
+        "records/stopped-<run_id>/answers/<step>.txt",
+        "records/stopped-<run_id>/traces/<step>.txt (when the server returned one)",
+        "records/stopped-<run_id>/job.json"
       ]
     },
     "sign-off": {
@@ -50,7 +54,7 @@
       "env": [],
       "writes": [
         "records/<job_id>/published.json",
-        "records/refused-<run_id>/published.json"
+        "records/stopped-<run_id>/published.json"
       ]
     },
     "unpublish": {
@@ -60,7 +64,7 @@
       "env": [],
       "writes": [
         "records/<job_id>/published.json",
-        "records/refused-<run_id>/published.json"
+        "records/stopped-<run_id>/published.json"
       ]
     },
     "feed": {

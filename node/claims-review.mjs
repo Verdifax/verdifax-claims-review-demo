@@ -47,6 +47,16 @@ const ROUTE_VERDICT = "claims-review/v1/verdict";
 const OBJECT_PREFIX = "claims-review/v1/";
 const LEVELS = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI"];
 const MIN_VERIFIER = "v0.34.0";
+// Anthropic's SDKs retry a dropped connection, 408, 409, 429 and any 5xx, but
+// only twice by default, waiting half a second then one second. That is too
+// short: on November 13, 2026 a 503 from the model API outlasted it and ended
+// this program after twelve sealed steps, failing a readiness run.
+// MODEL_RETRY_TRIES sets the number of tries for one model call; the SDK's
+// wait grows to a cap of eight seconds, so an outage of about two minutes is
+// waited out. A retry can bill a second model call when the first answer was
+// lost on the way back; each step's measured cost shows it. All four languages
+// hold the same number (demo-parity.json, R259).
+const MODEL_RETRY_TRIES = 21;
 // A stopped step's records live in records/stopped-<run_id>/, and the
 // model's exact answers in answers/ beside each job's steps/.
 const STOPPED_FOLDER_PREFIX = "stopped-";
@@ -210,7 +220,7 @@ async function ask(recorded, prompt, userText, ruleId, model) {
   const { zodOutputFormat } = await import("@anthropic-ai/sdk/helpers/zod");
   const { z } = await import("zod");
   const RuleAnswer = z.object({ verdict: z.string(), reason: z.string() });
-  const client = new Anthropic();
+  const client = new Anthropic({ maxRetries: MODEL_RETRY_TRIES - 1 });
   const response = await client.messages.parse({
     model,
     max_tokens: 4000,
@@ -241,7 +251,7 @@ async function askStructured(recorded, recordedKey, prompt, userText, model, max
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const { zodOutputFormat } = await import("@anthropic-ai/sdk/helpers/zod");
   const { z } = await import("zod");
-  const client = new Anthropic();
+  const client = new Anthropic({ maxRetries: MODEL_RETRY_TRIES - 1 });
   const response = await client.messages.parse({
     model,
     max_tokens: maxTokens,
@@ -792,7 +802,7 @@ async function main() {
 
 export {
   canonical, DELETED_STEP_SUFFIX, deletedSteps, draftClassification, FEED_AGE_REASON, HISTORY_AGE_REASON, loadRules, MIN_VERIFIER, printVerifyCommands,
-  readInput, RULE_SET, SAVED_HEAD_MAX_AGE, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
+  MODEL_RETRY_TRIES, readInput, RULE_SET, SAVED_HEAD_MAX_AGE, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
 };
 
 // Node loads the program by its real path, so the path it was started with is

@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   canonical, DELETED_STEP_SUFFIX, deletedSteps, draftClassification, FEED_AGE_REASON, HISTORY_AGE_REASON, loadRules, MIN_VERIFIER, printVerifyCommands,
-  readInput, RULE_SET, SAVED_HEAD_MAX_AGE, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
+  MODEL_RETRY_TRIES, readInput, RULE_SET, SAVED_HEAD_MAX_AGE, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
 } from "../claims-review.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -39,6 +39,17 @@ test("the parity copy matches the source", () => {
   const source = readFileSync(join(HERE, "..", "..", "demo-parity.json"), "utf8");
   const copy = readFileSync(join(HERE, "..", "testdata", "demo-parity.json"), "utf8");
   assert.equal(copy, source);
+});
+
+// R259: the SDK waits half a second before the first retry and doubles it to a
+// cap of eight, so the shared budget must reach a minute of waiting. Round 61:
+// the default of two retries waited about a second and a half, which a 503
+// from the model API outlasted.
+test("the model retry budget waits out an outage", () => {
+  assert.equal(Number(PARITY.constants.model_retry_tries), MODEL_RETRY_TRIES);
+  let waited = 0;
+  for (let i = 0; i < MODEL_RETRY_TRIES - 1; i += 1) waited += Math.min(8, 0.5 * 2 ** i);
+  assert.ok(waited >= 60, `the budget waits ${waited} seconds`);
 });
 
 // Answers as the server would from stop-cases.json. Each receipt route

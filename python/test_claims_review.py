@@ -59,6 +59,15 @@ class CanonicalJSON(unittest.TestCase):
         parity = json.loads(source)
         self.assertEqual(parity["constants"]["default_model"], cr.DEFAULT_MODEL)
         self.assertEqual(parity["constants"]["form"], cr.FORM)
+        self.assertEqual(int(parity["constants"]["model_retry_tries"]), cr.MODEL_RETRY_TRIES)
+
+    def test_the_model_retry_budget_waits_out_an_outage(self):
+        """R259: the SDK waits half a second before the first retry and
+        doubles it to a cap of eight, so the shared budget must reach a
+        minute of waiting. Round 61: the default of two retries waited about
+        a second and a half, which a 503 from the model API outlasted."""
+        waits = [min(8.0, 0.5 * 2 ** i) for i in range(cr.MODEL_RETRY_TRIES - 1)]
+        self.assertGreaterEqual(sum(waits), 60)
 
 
 class Failed(Exception):

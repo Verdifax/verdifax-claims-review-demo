@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -53,6 +55,36 @@ func TestRuleSetHash(t *testing.T) {
 func TestClassificationLine(t *testing.T) {
 	if draftClassification("# A draft\n\nText.") != "INTERNAL" || draftClassification("<!-- classification: CONFIDENTIAL -->\n# Memo") != "CONFIDENTIAL" {
 		t.Fatal("the classification line is not read")
+	}
+}
+
+// R259: the SDK waits half a second before the first retry and doubles it to a
+// cap of eight, so the shared budget must reach a minute of waiting. Round 61:
+// the default of two retries waited about a second and a half, which a 503
+// from the model API outlasted.
+func TestModelRetryBudgetWaitsOutAnOutage(t *testing.T) {
+	text, readErr := os.ReadFile(filepath.Join(repo, "demo-parity.json"))
+	if readErr != nil {
+		t.Fatalf("read demo-parity.json: %v", readErr)
+	}
+	var parity struct {
+		Constants struct {
+			ModelRetryTries string `json:"model_retry_tries"`
+		} `json:"constants"`
+	}
+	if parseErr := json.Unmarshal(text, &parity); parseErr != nil {
+		t.Fatalf("parse demo-parity.json: %v", parseErr)
+	}
+	named, convErr := strconv.Atoi(parity.Constants.ModelRetryTries)
+	if convErr != nil || named != modelRetryTries {
+		t.Fatalf("demo-parity.json names %q tries, the program holds %d (%v)", parity.Constants.ModelRetryTries, modelRetryTries, convErr)
+	}
+	waited := 0.0
+	for i := 0; i < modelRetryTries-1; i++ {
+		waited += math.Min(8, 0.5*math.Pow(2, float64(i)))
+	}
+	if waited < 60 {
+		t.Fatalf("a budget of %d tries waits %.1f seconds, under the 60 a model outage needs", modelRetryTries, waited)
 	}
 }
 

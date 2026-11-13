@@ -234,9 +234,19 @@ ask <- function(recorded, prompt, user_text, rule_id, model) {
 # model_request builds one call to the model's Messages API. Python, Node and
 # Go call the model through Anthropic's official SDKs, which retry a
 # temporary failure (a dropped connection, 408, 409, 429 or any 5xx, such as
-# 529 overloaded) twice with growing waits and honor Retry-After. There is no
+# 529 overloaded) with growing waits and honor Retry-After. There is no
 # official R SDK, so this request carries the same retry policy; without it
 # one temporary error stopped the R demo where the other languages carry on.
+# The SDKs retry only twice by default, waiting half a second then one
+# second. That is too short: on November 13, 2026 a 503 from the model API
+# outlasted it and ended the Go demo after twelve sealed steps, failing a
+# readiness run. MODEL_RETRY_TRIES sets the number of tries for one model
+# call in every language, and the wait grows to a cap of eight seconds, so an
+# outage of about two minutes is waited out. A retry can bill a second model
+# call when the first answer was lost on the way back; each step's measured
+# cost shows it. All four languages hold the same number (demo-parity.json,
+# R259).
+MODEL_RETRY_TRIES <- 21L
 MODEL_TRANSIENT_STATUS <- c(408L, 409L, 429L)
 model_transient <- function(resp) {
   status <- httr2::resp_status(resp)
@@ -247,8 +257,9 @@ model_request <- function(body, key) {
   req <- httr2::req_headers(req, `x-api-key` = key, `anthropic-version` = "2026-10-21", `content-type` = "application/json")
   req <- httr2::req_body_json(req, body, auto_unbox = TRUE)
   req <- httr2::req_timeout(req, 600)
-  httr2::req_retry(req, max_tries = 3, retry_on_failure = TRUE, is_transient = model_transient,
-                   backoff = function(attempt) min(60, 2^attempt))
+  httr2::req_retry(req, max_tries = MODEL_RETRY_TRIES, retry_on_failure = TRUE,
+                   is_transient = model_transient,
+                   backoff = function(attempt) min(8, 2^attempt))
 }
 
 # ask_structured asks the model for one answer in the JSON schema given. With

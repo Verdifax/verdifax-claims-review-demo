@@ -106,6 +106,7 @@
     "route_verdict": "claims-review/v1/verdict",
     "object_prefix": "claims-review/v1/",
     "min_verifier": "v0.34.0",
+    "model_retry_tries": "21",
     "program_id_source": "verdifax-claims-review-demo/program/v1",
     "registry_record_hash_source": "verdifax-claims-review-demo/registry/v1",
     "decision_kinds": [

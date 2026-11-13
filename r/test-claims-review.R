@@ -23,10 +23,17 @@ check(identical(source_text, copy_text), "the parity copy matches the source")
 
 # The model call retries a temporary failure as the official SDKs the other
 # three languages use do (round 58: one temporary error stopped the R demo in
-# a readiness run while Python, Node and Go would have retried).
+# a readiness run while Python, Node and Go would have retried), with the
+# shared budget every language holds and waits short enough to reach it
+# (round 61: the SDKs' default of two retries waited about a second and a
+# half, which a 503 from the model API outlasted; R259).
 req <- model_request(list(model = "m", max_tokens = 1L), "k")
-check(identical(req$policies$retry_max_tries, 3) && isTRUE(req$policies$retry_on_failure),
-      "the model call retries twice, after a dropped connection too")
+tries <- as.integer(jsonlite::fromJSON(source_text)$constants$model_retry_tries)
+waits <- vapply(seq_len(tries - 1L), req$policies$retry_backoff, 0)
+check(identical(req$policies$retry_max_tries, MODEL_RETRY_TRIES) &&
+        identical(MODEL_RETRY_TRIES, tries) && isTRUE(req$policies$retry_on_failure) &&
+        sum(waits) >= 60,
+      "the model call retries the shared number of times, after a dropped connection too")
 transient <- vapply(c(408L, 409L, 429L, 500L, 503L, 529L), function(code) model_transient(httr2::response(status_code = code)), TRUE)
 permanent <- vapply(c(400L, 401L, 403L, 404L, 422L), function(code) model_transient(httr2::response(status_code = code)), TRUE)
 check(all(transient) && !any(permanent), "only a temporary model error is retried")

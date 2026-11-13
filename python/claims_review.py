@@ -58,6 +58,16 @@ OBJECT_PREFIX = "claims-review/v1/"
 LEVELS = ("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
 VERDICTS = ("pass", "fail", "unanswered")
 MIN_VERIFIER = "v0.34.0"
+# Anthropic's SDKs retry a dropped connection, 408, 409, 429 and any 5xx, but
+# only twice by default, waiting half a second then one second. That is too
+# short: on November 13, 2026 a 503 from the model API outlasted it and ended
+# this program after twelve sealed steps, failing a readiness run.
+# MODEL_RETRY_TRIES sets the number of tries for one model call; the SDK's wait
+# grows to a cap of eight seconds, so an outage of about two minutes is waited
+# out. A retry can bill a second model call when the first answer was lost on
+# the way back; each step's measured cost shows it. All four languages hold the
+# same number (demo-parity.json, R259).
+MODEL_RETRY_TRIES = 21
 # A stopped step's records live in records/stopped-<run_id>/, and the
 # model's exact answers in answers/ beside each job's steps/.
 STOPPED_FOLDER_PREFIX = "stopped-"
@@ -220,7 +230,7 @@ class Answers:
             verdict: str
             reason: str
 
-        client = anthropic.Anthropic()
+        client = anthropic.Anthropic(max_retries=MODEL_RETRY_TRIES - 1)
         response = client.messages.parse(model=model, max_tokens=4000, system=prompt,
                                          messages=[{"role": "user", "content": user_text}], output_format=RuleAnswer)
         usage = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens}
@@ -246,7 +256,7 @@ class Answers:
         class ClaimList(BaseModel):
             claims: list[str]
 
-        client = anthropic.Anthropic()
+        client = anthropic.Anthropic(max_retries=MODEL_RETRY_TRIES - 1)
         response = client.messages.parse(model=model, max_tokens=4000, system=prompt,
                                          messages=[{"role": "user", "content": user_text}], output_format=ClaimList)
         usage = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens}
@@ -270,7 +280,7 @@ class Answers:
         class Explanation(BaseModel):
             explanation: str
 
-        client = anthropic.Anthropic()
+        client = anthropic.Anthropic(max_retries=MODEL_RETRY_TRIES - 1)
         response = client.messages.parse(model=model, max_tokens=2000, system=prompt,
                                          messages=[{"role": "user", "content": user_text}], output_format=Explanation)
         usage = {"input_tokens": response.usage.input_tokens, "output_tokens": response.usage.output_tokens}

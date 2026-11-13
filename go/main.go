@@ -48,6 +48,7 @@ import (
 
 	verdifax "github.com/Verdifax/verdifax-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/v2"
+	"github.com/anthropics/anthropic-sdk-go/v2/option"
 )
 
 const (
@@ -62,6 +63,17 @@ const (
 	routeVerdict   = "claims-review/v1/verdict"
 	objectPrefix   = "claims-review/v1/"
 	minVerifier    = "v0.34.0"
+	// Anthropic's SDKs retry a dropped connection, 408, 409, 429 and any
+	// 5xx, but only twice by default, waiting half a second then one
+	// second. That is too short: on November 13, 2026 a 503 from the
+	// model API outlasted it and ended this program after twelve sealed
+	// steps, failing a readiness run. modelRetryTries sets the number of
+	// tries for one model call; the SDK's wait grows to a cap of eight
+	// seconds, so an outage of about two minutes is waited out. A retry
+	// can bill a second model call when the first answer was lost on the
+	// way back; each step's measured cost shows it. All four languages
+	// hold the same number (demo-parity.json, R259).
+	modelRetryTries = 21
 	// A stopped step's records live in records/stopped-<run_id>/, and the
 	// model's exact answers in answers/ beside each job's steps/.
 	stoppedFolderPrefix = "stopped-"
@@ -344,7 +356,7 @@ func askStructured(ctx context.Context, recorded *recordedAnswer, recordedRaw, p
 		}
 		return out, true
 	}
-	client := anthropic.NewClient()
+	client := anthropic.NewClient(option.WithMaxRetries(modelRetryTries - 1))
 	response, callErr := client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:        anthropic.Model(model),
 		MaxTokens:    maxTokens,
@@ -436,7 +448,7 @@ func ask(ctx context.Context, recorded map[string]recordedAnswer, prompt, userTe
 		return answer{Model: a.Model, ResponseID: a.ResponseID, Verdict: a.Verdict, Reason: a.Reason,
 			Raw: canonical(map[string]string{"verdict": a.Verdict, "reason": a.Reason})}
 	}
-	client := anthropic.NewClient()
+	client := anthropic.NewClient(option.WithMaxRetries(modelRetryTries - 1))
 	schema := map[string]any{
 		"type":                 "object",
 		"properties":           map[string]any{"verdict": map[string]any{"type": "string"}, "reason": map[string]any{"type": "string"}},

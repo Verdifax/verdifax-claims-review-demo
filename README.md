@@ -22,7 +22,7 @@ The same program is here in Python, Node, Go and R, built on the Verdifax SDK in
 6. **Publish.** The account's owner key makes the job's records public on random links, or withdraws them. Each decision is sealed by Verdifax as a run publication with its place in the feed, so an auditor sees who made what public and when.
 7. **Feed.** The refusals, the sign-offs, the publications and the key changes appear in the account's signal feed, as a GRC system would receive them.
 
-Every record and its place in the job is anchored on the public log, and `verdifax-verify` checks it all offline; it reads every part of these records since v0.28.0, which hashes the review requirement in the demo's version 3 policy and runs it again. Records sealed under the version 2 policy, before the claims step, verify since v0.27.0.
+Every record and its place in the job is anchored on the public log, and `verdifax-verify` checks it all offline; it reads every part of these records since v0.28.0, which hashes the review requirement in the demo's version 3 policy and runs it again. Records sealed under the version 2 policy, before the claims step, verify since v0.27.0. The verify commands below use what the verifier has done since v0.34.0: it limits the age of a saved history's or feed's head statement, which the commands set explicitly, and reads a deleted step's tombstone in the step's place.
 
 ## Run it on your own drafts
 
@@ -55,7 +55,7 @@ CLAIMS_REVIEW_REPO=/path/to/verdifax-claims-review-demo /path/to/verdifax-claims
 
 ```bash
 # R 4.3 or later
-Rscript -e 'install.packages(c("remotes", "sodium")); remotes::install_github("Verdifax/verdifax-sdk-r@v1.14.0")'
+Rscript -e 'install.packages(c("remotes", "sodium")); remotes::install_github("Verdifax/verdifax-sdk-r@v1.15.0")'
 Rscript /path/to/verdifax-claims-review-demo/r/claims-review.R setup
 Rscript /path/to/verdifax-claims-review-demo/r/claims-review.R review draft.md
 ```
@@ -65,7 +65,7 @@ The commands and the files are the same in every language: a folder set up by on
 | Command | Does |
 |---|---|
 | `setup` | Registers the owner's request key, creates the agent's key and a feed key, registers an approver key generated on this machine, and activates the account policy in [policy/claims-review-v3.json](policy/claims-review-v3.json) ([v1](policy/claims-review-v1.json) and [v2](policy/claims-review-v2.json) are kept for records sealed under them). Runs once in a folder. Running it in a second folder for the same account adds another agent key, feed key and approver key. |
-| `review DRAFT.md [--model ID]` | Runs one job on the draft and writes its sealed records to `records/<job_id>/steps/` (the folder `verdifax-verify --job` reads), with the exact payload bytes beside them, so a reader recomputes every sealed payload hash. Prints the verdict, the measured model use and the verify commands. The model's exact answers go to `records/<job_id>/answers/`, one file per rule, so a reader recomputes each sealed `ai_output_hash`, and the text Verdifax's AI review checked goes to `records/<job_id>/traces/`, as the server returns it once, so a reader re-runs the review's check. A refused or halted step, at intake or later, stops the job: its receipt, the records sealed before it, every payload, every answer and every review trace go to `records/stopped-<run_id>/`, and `job.json` there names the step, the kind of stop and the model use spent before it. Any other error from the server is printed as the server gave it, and nothing is recorded as a stop. |
+| `review DRAFT.md [--model ID]` | Runs one job on the draft and writes its sealed records to `records/<job_id>/steps/` (the folder `verdifax-verify --job` reads), with the exact payload bytes beside them, so a reader recomputes every sealed payload hash. Prints the verdict, the measured model use and the verify commands. The model's exact answers go to `records/<job_id>/answers/`, one file per rule, so a reader recomputes each sealed `ai_output_hash`, and the text Verdifax's AI review checked goes to `records/<job_id>/traces/`, as the server returns it once, so a reader re-runs the review's check. A refused or halted step, at intake or later, stops the job: its receipt, the records sealed before it, every payload, every answer and every review trace go to `records/stopped-<run_id>/`, and `job.json` there names the step, the kind of stop and the model use spent before it. Any other error from the server is printed as the server gave it, and nothing is recorded as a stop. A step whose record was deleted from the account is written as its tombstone, `steps/<step>.deleted.json`, the `run.deleted` entry from the account's feed, which `verdifax-verify --job` reads in the step's place: the job then reads complete except the deleted steps, never complete. |
 | `sign-off JOB_ID approve\|reject [--note TEXT]` | Signs the decision on the job's verdict with the approver key. Only the note's hash is sent. |
 | `sign-off --receipt RUN_ID approve\|reject [--note TEXT]` | Signs a decision on the receipt of a refused or halted step: approve agrees that the step should have stopped, reject judges the stop wrong. Only the note's hash is sent. |
 | `publish JOB_ID` | Makes every record of the job public on a random link with the owner key, and writes `records/<job_id>/published.json` with each link and the sealed publication. `publish --receipt RUN_ID` makes a stopped step's receipt public with every step the job sealed before it, and writes `records/stopped-<run_id>/published.json`. A repeated publish keeps the sealed publication saved the first time. |
@@ -77,14 +77,16 @@ The commands and the files are the same in every language: a folder set up by on
 
 ## Check the results offline
 
-Install `verdifax-verify` from [github.com/Verdifax/verdifax-verify](https://github.com/Verdifax/verdifax-verify); it reads every part of these records since v0.28.0. Then, in the folder the program used:
+Install `verdifax-verify` from [github.com/Verdifax/verdifax-verify](https://github.com/Verdifax/verdifax-verify). It reads every part of these records since v0.28.0. The commands below use the flags it has had since v0.34.0, which limit the age of a saved history's or feed's head statement (24 hours unless the flag says otherwise), and since that release it reads a deleted step's tombstone. Then, in the folder the program used:
 
 ```bash
 verdifax-verify --job records/<job_id>/steps --aivp-traces records/<job_id>/traces
 verdifax-verify --account-policy /path/to/verdifax-claims-review-demo/policy/claims-review-v3.json records/<job_id>/steps/verdict.json
 verdifax-verify --signoff records/<job_id>/signoffs.json --approver-key approver.txt records/<job_id>/steps/verdict.json
-verdifax-verify --signoff-history records/<job_id>/signoff-history.json
-verdifax-verify --signals signals.json
+# 168h: a saved history is checked as of when it was fetched; raise the limit for an older copy, or run sign-off again to fetch it fresh
+verdifax-verify --signoff-history records/<job_id>/signoff-history.json --signoff-head-max-age 168h
+# 168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh
+verdifax-verify --signals signals.json --feed-head-max-age 168h
 ```
 
 ## The sample drafts
@@ -93,7 +95,7 @@ verdifax-verify --signals signals.json
 
 ## Tests
 
-`testdata/answers.json` holds recorded model answers for tests against a local Verdifax server, and `answers-refused.json` and `answers-halted.json` hold two variants whose rule 3 answer the server's content screen refuses or its review of the model's answer halts; the program refuses recorded answers against production. `demo-parity.json` lists every command, flag, file and sealed field, and Verdifax's checks hold the four programs equal to its commands, flags, environment variables, constants and sealed fields (the files each command writes are listed for readers and are not compared).
+`testdata/answers.json` holds recorded model answers for tests against a local Verdifax server, and `answers-refused.json` and `answers-halted.json` hold two variants whose rule 3 answer the server's content screen refuses or its review of the model's answer halts; the program refuses recorded answers against production. `deleted-step-cases.json` holds feed events every language reads to find a job's deleted steps and write each one's tombstone as `<step>.deleted.json`. `demo-parity.json` lists every command, flag, file and sealed field, and Verdifax's checks hold the four programs equal to its commands, flags, environment variables, constants and sealed fields (the files each command writes are listed for readers and are not compared).
 
 ## License
 

@@ -1,0 +1,341 @@
+{
+  "note": "Feed events every language reads for deleted job steps (R250): only a run.deleted event whose entry names the job counts, keyed by its step_id; a run.deleted of another job or of no job, and a run.sealed served with a null entry and the tombstone in data.deleted, are not. The tombstone written beside the steps is the run.deleted entry, every field kept. Each tombstone here carries job_links, the deleted step's sealed links (a list of one, a list of two and a final true), so every language shows it writes them as served.",
+  "job_id": "claims-review-0123456789ab-20261112T200000Z",
+  "events": [
+    {
+      "specversion": "1.0",
+      "id": "account-7/10",
+      "source": "https://api.verdifax.com/accounts/account-7",
+      "type": "com.verdifax.run.sealed",
+      "time": "2026-11-12T20:00:00Z",
+      "datacontenttype": "application/json",
+      "data": {
+        "form": "verdifax.signal.v1",
+        "kind": "run.sealed",
+        "account": "account-7",
+        "sequence": 10,
+        "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "event_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "entry": null,
+        "run_id": 702,
+        "deleted": {
+          "format": "verdifax.run-deletion.v1",
+          "decided_by": "owner",
+          "run_id": 702,
+          "record_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "job_id": "claims-review-0123456789ab-20261112T200000Z",
+          "step_id": "rule-02",
+          "job_links": {
+            "previous_record_hashes": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ]
+          },
+          "log_entries": [
+            "4242"
+          ],
+          "changed_at": "2026-11-12T20:00:00.123456789Z",
+          "signal": {
+            "account": "account-7",
+            "sequence": 30,
+            "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "deletion_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "anchor": {
+            "log_index": 987654321,
+            "integrated_time": 1762977600,
+            "kind": "run_deletion"
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "account-7/11",
+      "source": "https://api.verdifax.com/accounts/account-7",
+      "type": "com.verdifax.run.sealed",
+      "time": "2026-11-12T20:00:00Z",
+      "datacontenttype": "application/json",
+      "data": {
+        "form": "verdifax.signal.v1",
+        "kind": "run.sealed",
+        "account": "account-7",
+        "sequence": 11,
+        "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "event_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "entry": {
+          "format": "verdifax.run-sealed.v1",
+          "run_id": 703,
+          "record_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "job_id": "claims-review-0123456789ab-20261112T200000Z",
+          "step_id": "rule-03"
+        },
+        "run_id": 703
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "account-7/12",
+      "source": "https://api.verdifax.com/accounts/account-7",
+      "type": "com.verdifax.signoff.recorded",
+      "time": "2026-11-12T20:00:00Z",
+      "datacontenttype": "application/json",
+      "data": {
+        "form": "verdifax.signal.v1",
+        "kind": "signoff.recorded",
+        "account": "account-7",
+        "sequence": 12,
+        "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "event_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "entry": {
+          "format": "verdifax.signoff.v1",
+          "target": {
+            "kind": "job",
+            "run_id": 703
+          }
+        }
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "account-7/28",
+      "source": "https://api.verdifax.com/accounts/account-7",
+      "type": "com.verdifax.run.deleted",
+      "time": "2026-11-12T20:00:00Z",
+      "datacontenttype": "application/json",
+      "data": {
+        "form": "verdifax.signal.v1",
+        "kind": "run.deleted",
+        "account": "account-7",
+        "sequence": 28,
+        "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "event_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "entry": {
+          "format": "verdifax.run-deletion.v1",
+          "decided_by": "owner",
+          "run_id": 801,
+          "record_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "job_id": "claims-review-other-job",
+          "step_id": "rule-02",
+          "log_entries": [
+            "4242"
+          ],
+          "changed_at": "2026-11-12T20:00:00.123456789Z",
+          "signal": {
+            "account": "account-7",
+            "sequence": 28,
+            "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "deletion_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "anchor": {
+            "log_index": 987654321,
+            "integrated_time": 1762977600,
+            "kind": "run_deletion"
+          }
+        },
+        "run_id": 801
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "account-7/29",
+      "source": "https://api.verdifax.com/accounts/account-7",
+      "type": "com.verdifax.run.deleted",
+      "time": "2026-11-12T20:00:00Z",
+      "datacontenttype": "application/json",
+      "data": {
+        "form": "verdifax.signal.v1",
+        "kind": "run.deleted",
+        "account": "account-7",
+        "sequence": 29,
+        "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "event_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "entry": {
+          "format": "verdifax.run-deletion.v1",
+          "decided_by": "verdifax_admin",
+          "run_id": 802,
+          "record_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "log_entries": [
+            "4242"
+          ],
+          "changed_at": "2026-11-12T20:00:00.123456789Z",
+          "signal": {
+            "account": "account-7",
+            "sequence": 29,
+            "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "deletion_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "anchor": {
+            "log_index": 987654321,
+            "integrated_time": 1762977600,
+            "kind": "run_deletion"
+          }
+        },
+        "run_id": 802
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "account-7/30",
+      "source": "https://api.verdifax.com/accounts/account-7",
+      "type": "com.verdifax.run.deleted",
+      "time": "2026-11-12T20:00:00Z",
+      "datacontenttype": "application/json",
+      "data": {
+        "form": "verdifax.signal.v1",
+        "kind": "run.deleted",
+        "account": "account-7",
+        "sequence": 30,
+        "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "event_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "entry": {
+          "format": "verdifax.run-deletion.v1",
+          "decided_by": "owner",
+          "run_id": 702,
+          "record_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "job_id": "claims-review-0123456789ab-20261112T200000Z",
+          "step_id": "rule-02",
+          "job_links": {
+            "previous_record_hashes": [
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            ]
+          },
+          "log_entries": [
+            "4242"
+          ],
+          "changed_at": "2026-11-12T20:00:00.123456789Z",
+          "signal": {
+            "account": "account-7",
+            "sequence": 30,
+            "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "deletion_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "anchor": {
+            "log_index": 987654321,
+            "integrated_time": 1762977600,
+            "kind": "run_deletion"
+          }
+        },
+        "run_id": 702
+      }
+    },
+    {
+      "specversion": "1.0",
+      "id": "account-7/31",
+      "source": "https://api.verdifax.com/accounts/account-7",
+      "type": "com.verdifax.run.deleted",
+      "time": "2026-11-12T20:00:00Z",
+      "datacontenttype": "application/json",
+      "data": {
+        "form": "verdifax.signal.v1",
+        "kind": "run.deleted",
+        "account": "account-7",
+        "sequence": 31,
+        "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+        "event_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "entry": {
+          "format": "verdifax.run-deletion.v1",
+          "decided_by": "owner",
+          "run_id": 718,
+          "record_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "job_id": "claims-review-0123456789ab-20261112T200000Z",
+          "step_id": "verdict",
+          "job_links": {
+            "previous_record_hashes": [
+              "1111111111111111111111111111111111111111111111111111111111111111",
+              "2222222222222222222222222222222222222222222222222222222222222222"
+            ],
+            "final": true
+          },
+          "log_entries": [
+            "4242"
+          ],
+          "changed_at": "2026-11-12T20:00:00.123456789Z",
+          "signal": {
+            "account": "account-7",
+            "sequence": 31,
+            "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+          },
+          "deletion_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "anchor": {
+            "log_index": 987654321,
+            "integrated_time": 1762977600,
+            "kind": "run_deletion"
+          },
+          "owner_signature": {
+            "public_key": "MCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "signature": "c2lnbmF0dXJl",
+            "signed_at": "2026-11-12T20:00:01Z",
+            "nonce": "00112233445566778899aabbccddeeff"
+          }
+        },
+        "run_id": 718
+      }
+    }
+  ],
+  "want": {
+    "rule-02": {
+      "format": "verdifax.run-deletion.v1",
+      "decided_by": "owner",
+      "run_id": 702,
+      "record_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_id": "claims-review-0123456789ab-20261112T200000Z",
+      "step_id": "rule-02",
+      "job_links": {
+        "previous_record_hashes": [
+          "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ]
+      },
+      "log_entries": [
+        "4242"
+      ],
+      "changed_at": "2026-11-12T20:00:00.123456789Z",
+      "signal": {
+        "account": "account-7",
+        "sequence": 30,
+        "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "deletion_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "anchor": {
+        "log_index": 987654321,
+        "integrated_time": 1762977600,
+        "kind": "run_deletion"
+      }
+    },
+    "verdict": {
+      "format": "verdifax.run-deletion.v1",
+      "decided_by": "owner",
+      "run_id": 718,
+      "record_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "job_id": "claims-review-0123456789ab-20261112T200000Z",
+      "step_id": "verdict",
+      "job_links": {
+        "previous_record_hashes": [
+          "1111111111111111111111111111111111111111111111111111111111111111",
+          "2222222222222222222222222222222222222222222222222222222222222222"
+        ],
+        "final": true
+      },
+      "log_entries": [
+        "4242"
+      ],
+      "changed_at": "2026-11-12T20:00:00.123456789Z",
+      "signal": {
+        "account": "account-7",
+        "sequence": 31,
+        "previous_signal_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "deletion_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "anchor": {
+        "log_index": 987654321,
+        "integrated_time": 1762977600,
+        "kind": "run_deletion"
+      },
+      "owner_signature": {
+        "public_key": "MCowBQYDK2VwAyEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "signature": "c2lnbmF0dXJl",
+        "signed_at": "2026-11-12T20:00:01Z",
+        "nonce": "00112233445566778899aabbccddeeff"
+      }
+    }
+  }
+}

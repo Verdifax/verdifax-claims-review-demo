@@ -45,7 +45,7 @@ ROUTE_RULE <- "claims-review/v1/rule-check"
 ROUTE_VERDICT <- "claims-review/v1/verdict"
 OBJECT_PREFIX <- "claims-review/v1/"
 LEVELS <- c("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
-MIN_VERIFIER <- "v0.28.0"
+MIN_VERIFIER <- "v0.34.0"
 # A stopped step's records live in records/stopped-<run_id>/, and the
 # model's exact answers in answers/ beside each job's steps/.
 STOPPED_FOLDER_PREFIX <- "stopped-"
@@ -59,6 +59,15 @@ POLICY_FILE <- "claims-review-v3.json"
 # explaining the verdict code decided.
 CLAIMS_PROMPT <- "claims-prompt-v1.txt"
 VERDICT_PROMPT <- "verdict-prompt-v1.txt"
+# A step whose record was deleted is written as its tombstone,
+# steps/<step>.deleted.json: the run.deleted entry from the account feed,
+# which verdifax-verify --job reads in the step's place (R250).
+DELETED_STEP_SUFFIX <- ".deleted.json"
+# A saved sign-off history or feed is checked as of when it was fetched, so
+# every printed re-check states the limit on its head statement's age (R246).
+SAVED_HEAD_MAX_AGE <- "168h"
+HISTORY_AGE_REASON <- "(168h: a saved history is checked as of when it was fetched; raise the limit for an older copy, or run sign-off again to fetch it fresh)"
+FEED_AGE_REASON <- "(168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh)"
 
 script_dir <- function() {
   args <- commandArgs(trailingOnly = FALSE)
@@ -548,7 +557,10 @@ stop_job <- function(agent, job_id, step, run_ids, payloads, answer_texts, draft
   reason <- error_reason(e)
   folder <- stopped_folder(stopped)  # named by the run, so two stops never share a folder
   write_json(file.path(folder, "receipt.json"), stop_receipt(agent, row$status, stopped))
-  for (sealed_step in names(run_ids)) {
+  # A sealed step whose record was deleted since is kept as its tombstone.
+  deleted <- if (length(run_ids) > 0) sealed_only(deleted_steps(read_account_feed(load_keys()), job_id), run_ids) else list()
+  write_deleted_steps(folder, deleted)
+  for (sealed_step in setdiff(names(run_ids), names(deleted))) {
     write_text(file.path(folder, "steps", paste0(sealed_step, ".json")), verdifax_get_run_artifacts(agent, run_ids[[sealed_step]]))
   }
   for (name in names(payloads)) write_text(file.path(folder, "payloads", paste0(name, ".json")), canonical(payloads[[name]]))
@@ -567,14 +579,19 @@ stop_job <- function(agent, job_id, step, run_ids, payloads, answer_texts, draft
 }
 
 save_job_records <- function(agent, job_id, out, run_ids, payloads) {
-  rows <- verdifax_export_runs(agent, job_id = job_id)$runs
-  if (length(rows) != length(run_ids)) {
-    fail(sprintf("the export lists %d records for %s, the program sealed %d", length(rows), job_id, length(run_ids)))
+  # A deleted step's record is gone from the export; its tombstone in the
+  # account feed stands in its place (R250).
+  deleted <- sealed_only(deleted_steps(read_account_feed(load_keys()), job_id), run_ids)
+  rows <- Filter(function(r) !(r$step_id %in% names(deleted)), verdifax_export_runs(agent, job_id = job_id)$runs)
+  if (length(rows) + length(deleted) != length(run_ids)) {
+    fail(sprintf("the export lists %d records and the feed %d deleted steps for %s, the program sealed %d",
+                 length(rows), length(deleted), job_id, length(run_ids)))
   }
   # The sealed step records alone sit in steps/, the folder verdifax-verify
   # --job reads: it takes every .json file there as a record, so the
   # summary, the sign-offs and the payloads live beside that folder.
   dir.create(file.path(out, "payloads"), showWarnings = FALSE, recursive = TRUE)
+  write_deleted_steps(out, deleted)
   for (row in rows) {
     if (!is.null(STOP_KINDS[[row$status]])) {
       write_json(file.path(out, "steps", paste0(row$step_id, ".json")), stop_receipt(agent, row$status, row$run_id))
@@ -586,6 +603,53 @@ save_job_records <- function(agent, job_id, out, run_ids, payloads) {
   # payload hash from the file.
   for (step in names(payloads)) write_text(file.path(out, "payloads", paste0(step, ".json")), canonical(payloads[[step]]))
 }
+
+# The steps of job job_id whose records were deleted, each with its
+# tombstone: the entry of every run.deleted event naming the job, by its
+# step. A run.sealed event whose record was deleted carries the tombstone in
+# data$deleted with a null entry; it is not the deletion and is passed over,
+# as is a deletion of another job or of no job.
+deleted_steps <- function(events, job_id) {
+  out <- list()
+  for (e in events) {
+    entry <- e$data$entry
+    if (!identical(e$data$kind, "run.deleted") || !is.list(entry) || !identical(entry$job_id, job_id) ||
+        !is.character(entry$step_id) || !nzchar(entry$step_id)) next
+    out[[entry$step_id]] <- entry
+  }
+  out
+}
+
+# The deleted steps this program sealed.
+sealed_only <- function(deleted, run_ids) deleted[intersect(names(deleted), names(run_ids))]
+
+# Writes each deleted step's tombstone as <folder>/steps/<step>.deleted.json,
+# every field as the server sent it, beside the step records verdifax-verify
+# --job reads.
+write_deleted_steps <- function(folder, deleted) {
+  for (step in names(deleted)) write_json(file.path(folder, "steps", paste0(step, DELETED_STEP_SUFFIX)), deleted[[step]])
+}
+
+# The account's whole feed, read with the feed key, page by page.
+read_account_feed <- function(keys) {
+  feed <- verdifax_client(base_url = base_url(), api_key = keys$feed$secret)
+  events <- list()
+  after <- 0
+  repeat {
+    page <- verdifax_get_signals(feed, after = after, limit = 500)
+    events <- c(events, page$events)
+    if (length(page$events) < 500) break
+    after <- page$next_after
+  }
+  events
+}
+
+# The re-check of a saved sign-off history or feed, with its head age limit,
+# and the reason for the limit on the line after (R246).
+history_check <- function(path) c(sprintf("verdifax-verify --signoff-history %s --signoff-head-max-age %s", path, SAVED_HEAD_MAX_AGE),
+                                  paste0("  ", HISTORY_AGE_REASON))
+feed_check <- function() c(sprintf("verdifax-verify --signals signals.json --feed-head-max-age %s", SAVED_HEAD_MAX_AGE),
+                           paste0("  ", FEED_AGE_REASON))
 
 # ── sign-off ───────────────────────────────────────────────────────────────
 
@@ -617,7 +681,8 @@ cmd_sign_off <- function(job_id, decision, note, receipt_run_id) {
   write_text(file.path(folder, "signoff-history.json"), verdifax_get_signoff_history(owner))
   cat(sprintf("sign-off %s recorded as sequence %s, hash %s\n", decision, record$sequence, record$signoff_hash))
   cat(sprintf("verify: verdifax-verify --signoff %s --approver-key approver.txt %s\n", file.path(folder, "signoffs.json"), file.path(folder, record_file)))
-  cat(sprintf("verify: verdifax-verify --signoff-history %s\n", file.path(folder, "signoff-history.json")))
+  history <- history_check(file.path(folder, "signoff-history.json"))
+  cat(sprintf("verify: %s\n%s\n", history[1], history[2]))
 }
 
 # ── feed ───────────────────────────────────────────────────────────────────
@@ -673,24 +738,17 @@ cmd_publication <- function(job_id, receipt, publish) {
     shown <- if (!is.null(published$verdict)) published$verdict else if (!is.null(published$receipt)) published$receipt else published[[sort(names(published))[1]]]
     cat(sprintf("public link: %s\n", shown$verify_url))
   }
-  cat("each decision is an event in the account's feed; after `feed`, verify: verdifax-verify --signals signals.json\n")
+  feed <- feed_check()
+  cat(sprintf("each decision is an event in the account's feed; after `feed`, verify: %s\n%s\n", feed[1], feed[2]))
 }
 
 cmd_feed <- function() {
-  keys <- load_keys()
-  feed <- verdifax_client(base_url = base_url(), api_key = keys$feed$secret)
-  events <- list()
-  after <- 0
-  repeat {
-    page <- verdifax_get_signals(feed, after = after, limit = 500)
-    events <- c(events, page$events)
-    if (length(page$events) < 500) break
-    after <- page$next_after
-  }
+  events <- read_account_feed(load_keys())
   write_json("signals.json", events)
   kinds <- table(vapply(events, function(e) e$data$kind, character(1)))
   cat(sprintf("%d events in the feed: %s\n", length(events), paste(sprintf("%s %d", names(kinds), as.integer(kinds)), collapse = ", ")))
-  cat("verify: verdifax-verify --signals signals.json\n")
+  feed <- feed_check()
+  cat(sprintf("verify: %s\n%s\n", feed[1], feed[2]))
 }
 
 # ── verify commands ────────────────────────────────────────────────────────
@@ -704,7 +762,14 @@ print_verify_commands <- function(job_id) {
   if (file.exists(file.path(folder, "signoffs.json"))) {
     cat(sprintf("  verdifax-verify --signoff %s --approver-key approver.txt %s\n", file.path(folder, "signoffs.json"), file.path(folder, "steps", "verdict.json")))
   }
-  if (file.exists("signals.json")) cat("  verdifax-verify --signals signals.json\n")
+  if (file.exists(file.path(folder, "signoff-history.json"))) {
+    history <- history_check(file.path(folder, "signoff-history.json"))
+    cat(sprintf("  %s\n%s\n", history[1], history[2]))
+  }
+  if (file.exists("signals.json")) {
+    feed <- feed_check()
+    cat(sprintf("  %s\n%s\n", feed[1], feed[2]))
+  }
 }
 
 # ── main ───────────────────────────────────────────────────────────────────

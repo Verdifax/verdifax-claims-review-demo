@@ -145,3 +145,73 @@ class InputBytes(unittest.TestCase):
         for name in listed:
             read = hashlib.sha256(cr.read_input(repo / name).encode("utf-8")).hexdigest()
             self.assertEqual(read, PARITY["input_sha256"][name], name)
+
+
+# R250: a deleted step's tombstone, from the cases every language runs.
+DELETED = json.loads((HERE.parent / "testdata" / "deleted-step-cases.json").read_text(encoding="utf-8"))
+
+
+class DeletedSteps(unittest.TestCase):
+    def test_a_deleted_step_is_read_from_its_jobs_run_deleted_events_only(self):
+        self.assertEqual(cr.deleted_steps(DELETED["events"], DELETED["job_id"]), DELETED["want"])
+        self.assertEqual(cr.deleted_steps(DELETED["events"], "claims-review-no-such-job"), {})
+        self.assertEqual(cr.DELETED_STEP_SUFFIX, PARITY["constants"]["deleted_step_suffix"])
+
+    def test_a_deleted_steps_tombstone_is_written_beside_the_steps_with_every_field(self):
+        # The SDK hands over the feed as parsed JSON, so the program writes
+        # every field again: each written tombstone must equal the served one
+        # field for field, with the same JSON types, job_links included
+        # (round 61), so it hashes to the same deletion_hash.
+        import tempfile
+        def typed(value):
+            if isinstance(value, dict):
+                return {k: typed(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [typed(v) for v in value]
+            return (type(value).__name__, value)
+        served = cr.deleted_steps(DELETED["events"], DELETED["job_id"])
+        with tempfile.TemporaryDirectory() as d:
+            cr.write_deleted_steps(pathlib.Path(d), served)
+            written = sorted(p.name for p in (pathlib.Path(d) / "steps").iterdir())
+            self.assertEqual(written, ["rule-02.deleted.json", "verdict.deleted.json"])
+            for step, entry in DELETED["want"].items():
+                kept = json.loads((pathlib.Path(d) / "steps" / (step + cr.DELETED_STEP_SUFFIX)).read_text(encoding="utf-8"))
+                self.assertEqual(typed(kept), typed(entry))
+                self.assertEqual(list(kept), list(entry))
+                self.assertEqual(kept["job_links"], entry["job_links"])
+
+
+class HeadAgeLimits(unittest.TestCase):
+    """R246: every printed re-check of a saved history or feed states its
+    head age limit, with the reason on the line after."""
+
+    def test_printed_rechecks_state_their_head_age_limit(self):
+        import contextlib
+        import io
+        import os
+        import tempfile
+        here = os.getcwd()
+        printed = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            try:
+                os.chdir(d)
+                (pathlib.Path("records") / "job-1").mkdir(parents=True)
+                (pathlib.Path("records") / "job-1" / "signoff-history.json").write_text("[]", encoding="utf-8")
+                pathlib.Path("signals.json").write_text("[]", encoding="utf-8")
+                with contextlib.redirect_stdout(printed):
+                    cr.print_verify_commands("job-1")
+            finally:
+                os.chdir(here)
+        lines = printed.getvalue().splitlines()
+        constants = PARITY["constants"]
+        self.assertEqual(cr.MIN_VERIFIER, constants["min_verifier"])
+        self.assertEqual(lines[0], "verify with verdifax-verify %s or later:" % cr.MIN_VERIFIER)
+        history = next(i for i, line in enumerate(lines) if "--signoff-history" in line)
+        feed = next(i for i, line in enumerate(lines) if "--signals" in line)
+        self.assertEqual(lines[history], "  verdifax-verify --signoff-history %s --signoff-head-max-age %s"
+                         % (pathlib.Path("records") / "job-1" / "signoff-history.json", cr.SAVED_HEAD_MAX_AGE))
+        self.assertEqual(lines[history + 1], "  " + cr.HISTORY_AGE_REASON)
+        self.assertEqual(lines[feed], "  verdifax-verify --signals signals.json --feed-head-max-age %s" % cr.SAVED_HEAD_MAX_AGE)
+        self.assertEqual(lines[feed + 1], "  " + cr.FEED_AGE_REASON)
+        self.assertEqual((cr.SAVED_HEAD_MAX_AGE, cr.HISTORY_AGE_REASON, cr.FEED_AGE_REASON),
+                         (constants["saved_head_max_age"], constants["history_age_reason"], constants["feed_age_reason"]))

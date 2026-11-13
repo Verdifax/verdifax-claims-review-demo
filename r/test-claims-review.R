@@ -84,3 +84,53 @@ on_disk <- sort(c(paste0("samples/", list.files(file.path(REPO, "samples"))), pa
 check(identical(listed, on_disk), "the parity file lists every sample and policy file")
 read_ok <- vapply(listed, function(f) identical(sha256_hex(read_text(file.path(REPO, f))), parity$input_sha256[[f]]), logical(1))
 check(all(read_ok), "every input file reads as its exact bytes")
+
+# R250: a deleted step's tombstone, from the cases every language runs.
+deleted_cases <- jsonlite::fromJSON(file.path(REPO, "testdata", "deleted-step-cases.json"), simplifyVector = FALSE)
+check(identical(deleted_steps(deleted_cases$events, deleted_cases$job_id), deleted_cases$want) &&
+        length(deleted_steps(deleted_cases$events, "claims-review-no-such-job")) == 0 &&
+        identical(DELETED_STEP_SUFFIX, constants$deleted_step_suffix),
+      "a deleted step is read from its job's run.deleted events only")
+# The SDK hands over the feed as parsed JSON, so the program writes every
+# field again: each written tombstone must equal the served one field for
+# field, job_links included (round 61): a list of one stays a list, final
+# stays true, and every number keeps its digits.
+tomb_dir <- tempfile("claims-review-")
+write_deleted_steps(tomb_dir, deleted_steps(deleted_cases$events, deleted_cases$job_id))
+kept_ok <- vapply(names(deleted_cases$want), function(step) {
+  path <- file.path(tomb_dir, "steps", paste0(step, DELETED_STEP_SUFFIX))
+  text <- paste(readLines(path, warn = FALSE), collapse = "")
+  kept <- jsonlite::fromJSON(text, simplifyVector = FALSE)
+  served <- deleted_cases$want[[step]]
+  compact <- gsub("[[:space:]]", "", text)
+  identical(kept, served) && is.list(kept$job_links$previous_record_hashes) &&
+    grepl('"previous_record_hashes":[', compact, fixed = TRUE) &&
+    all(vapply(c(sprintf('"run_id":%s', format(served$run_id, scientific = FALSE)), sprintf('"log_index":%s', format(served$anchor$log_index, scientific = FALSE)),
+                 sprintf('"integrated_time":%s', format(served$anchor$integrated_time, scientific = FALSE))),
+               function(literal) grepl(literal, compact, fixed = TRUE), logical(1)))
+}, logical(1))
+check(identical(sort(list.files(file.path(tomb_dir, "steps"))), c("rule-02.deleted.json", "verdict.deleted.json")) && all(kept_ok) &&
+        identical(deleted_cases$want$verdict$job_links$final, TRUE),
+      "a deleted step's tombstone is written beside the steps with every field, job_links included")
+unlink(tomb_dir, recursive = TRUE)
+
+# R246: every printed re-check of a saved history or feed states its head age
+# limit, with the reason on the line after.
+verify_dir <- tempfile("claims-review-")
+dir.create(file.path(verify_dir, "records", "job-1"), recursive = TRUE)
+old_wd <- setwd(verify_dir)
+writeLines("[]", file.path("records", "job-1", "signoff-history.json"))
+writeLines("[]", "signals.json")
+printed <- capture.output(print_verify_commands("job-1"))
+setwd(old_wd)
+unlink(verify_dir, recursive = TRUE)
+history_at <- grep("--signoff-history", printed, fixed = TRUE)[1]
+feed_at <- grep("--signals", printed, fixed = TRUE)[1]
+check(identical(MIN_VERIFIER, constants$min_verifier) && identical(printed[1], sprintf("verify with verdifax-verify %s or later:", MIN_VERIFIER)) &&
+        identical(printed[history_at], sprintf("  verdifax-verify --signoff-history %s --signoff-head-max-age %s", file.path("records", "job-1", "signoff-history.json"), SAVED_HEAD_MAX_AGE)) &&
+        identical(printed[history_at + 1], paste0("  ", HISTORY_AGE_REASON)) &&
+        identical(printed[feed_at], sprintf("  verdifax-verify --signals signals.json --feed-head-max-age %s", SAVED_HEAD_MAX_AGE)) &&
+        identical(printed[feed_at + 1], paste0("  ", FEED_AGE_REASON)) &&
+        identical(c(SAVED_HEAD_MAX_AGE, HISTORY_AGE_REASON, FEED_AGE_REASON),
+                  c(constants$saved_head_max_age, constants$history_age_reason, constants$feed_age_reason)),
+      "every printed re-check of a saved history or feed states its head age limit")

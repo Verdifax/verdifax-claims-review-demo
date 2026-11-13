@@ -61,7 +61,7 @@ const (
 	routeRule      = "claims-review/v1/rule-check"
 	routeVerdict   = "claims-review/v1/verdict"
 	objectPrefix   = "claims-review/v1/"
-	minVerifier    = "v0.28.0"
+	minVerifier    = "v0.34.0"
 	// A stopped step's records live in records/stopped-<run_id>/, and the
 	// model's exact answers in answers/ beside each job's steps/.
 	stoppedFolderPrefix = "stopped-"
@@ -77,6 +77,16 @@ const (
 	// and explaining the verdict code decided.
 	claimsPrompt  = "claims-prompt-v1.txt"
 	verdictPrompt = "verdict-prompt-v1.txt"
+	// A step whose record was deleted is written as its tombstone,
+	// steps/<step>.deleted.json: the run.deleted entry from the account
+	// feed, which verdifax-verify --job reads in the step's place (R250).
+	deletedStepSuffix = ".deleted.json"
+	// A saved sign-off history or feed is checked as of when it was
+	// fetched, so every printed re-check states the limit on its head
+	// statement's age (R246).
+	savedHeadMaxAge  = "168h"
+	historyAgeReason = "(168h: a saved history is checked as of when it was fetched; raise the limit for an older copy, or run sign-off again to fetch it fresh)"
+	feedAgeReason    = "(168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh)"
 )
 
 var levels = map[string]bool{"PUBLIC": true, "INTERNAL": true, "CONFIDENTIAL": true, "RESTRICTED": true, "TOP_SECRET": true, "TS_SCI": true}
@@ -758,7 +768,16 @@ func stop(ctx context.Context, agent *verdifax.Client, jobID, step string, runID
 	stopped := row.RunID
 	folder := stoppedFolder(stopped) // named by the run, so two stops never share a folder
 	writeJSON(filepath.Join(folder, "receipt.json"), stopReceipt(ctx, agent, row.Status, stopped))
+	// A sealed step whose record was deleted since is kept as its tombstone.
+	deleted := map[string]json.RawMessage{}
+	if len(runIDs) > 0 {
+		deleted = sealedOnly(deletedSteps(readAccountFeed(ctx, loadKeys()), jobID), runIDs)
+	}
+	writeDeletedSteps(folder, deleted)
 	for sealedStep, runID := range runIDs {
+		if _, gone := deleted[sealedStep]; gone {
+			continue
+		}
 		artifacts, artifactsErr := agent.GetRunArtifacts(ctx, runID)
 		must(artifactsErr)
 		writeText(filepath.Join(folder, "steps", sealedStep+".json"), string(artifacts))
@@ -810,16 +829,26 @@ func stoppedFolder(runID int64) string {
 }
 
 func saveJobRecords(ctx context.Context, agent *verdifax.Client, jobID, out string, runIDs map[string]int64, payloads map[string]any) {
+	// A deleted step's record is gone from the export; its tombstone in the
+	// account feed stands in its place (R250).
+	deleted := sealedOnly(deletedSteps(readAccountFeed(ctx, loadKeys()), jobID), runIDs)
 	export, exportErr := agent.ExportRuns(ctx, &verdifax.ExportRunsParams{JobID: jobID})
 	must(exportErr)
-	if len(export.Runs) != len(runIDs) {
-		fail(fmt.Sprintf("the export lists %d records for %s, the program sealed %d", len(export.Runs), jobID, len(runIDs)))
+	rows := make([]verdifax.ExportRow, 0, len(export.Runs))
+	for _, row := range export.Runs {
+		if _, gone := deleted[row.StepID]; !gone {
+			rows = append(rows, row)
+		}
+	}
+	if len(rows)+len(deleted) != len(runIDs) {
+		fail(fmt.Sprintf("the export lists %d records and the feed %d deleted steps for %s, the program sealed %d", len(rows), len(deleted), jobID, len(runIDs)))
 	}
 	// The sealed step records alone sit in steps/, the folder verdifax-verify
 	// --job reads: it takes every .json file there as a record, so the
 	// summary, the sign-offs and the payloads live beside that folder.
 	must(os.MkdirAll(filepath.Join(out, "payloads"), 0o755))
-	for _, row := range export.Runs {
+	writeDeletedSteps(out, deleted)
+	for _, row := range rows {
 		if _, isStop := stopKinds[row.Status]; isStop {
 			writeJSON(filepath.Join(out, "steps", row.StepID+".json"), stopReceipt(ctx, agent, row.Status, row.RunID))
 			continue
@@ -833,6 +862,81 @@ func saveJobRecords(ctx context.Context, agent *verdifax.Client, jobID, out stri
 	for step, payload := range payloads {
 		writeText(filepath.Join(out, "payloads", step+".json"), canonical(payload))
 	}
+}
+
+// deletedSteps is the steps of job jobID whose records were deleted, each
+// with its tombstone: the entry of every run.deleted event naming the job,
+// by its step, as the exact bytes the server sent. A run.sealed event whose
+// record was deleted carries the tombstone in data.deleted with a null
+// entry; it is not the deletion and is passed over, as is a deletion of
+// another job or of no job.
+func deletedSteps(events []verdifax.SignalEvent, jobID string) map[string]json.RawMessage {
+	out := map[string]json.RawMessage{}
+	for _, e := range events {
+		if e.Data.Kind != "run.deleted" {
+			continue
+		}
+		var place struct {
+			JobID  string `json:"job_id"`
+			StepID string `json:"step_id"`
+		}
+		if json.Unmarshal(e.Data.Entry, &place) != nil || place.JobID != jobID || place.StepID == "" {
+			continue
+		}
+		out[place.StepID] = e.Data.Entry
+	}
+	return out
+}
+
+// sealedOnly keeps the deleted steps this program sealed.
+func sealedOnly(deleted map[string]json.RawMessage, runIDs map[string]int64) map[string]json.RawMessage {
+	out := map[string]json.RawMessage{}
+	for step, entry := range deleted {
+		if _, sealed := runIDs[step]; sealed {
+			out[step] = entry
+		}
+	}
+	return out
+}
+
+// writeDeletedSteps writes each deleted step's tombstone as
+// <folder>/steps/<step>.deleted.json, the server's exact bytes, beside the
+// step records verdifax-verify --job reads.
+func writeDeletedSteps(folder string, deleted map[string]json.RawMessage) {
+	for step, entry := range deleted {
+		writeText(filepath.Join(folder, "steps", step+deletedStepSuffix), string(entry)+"\n")
+	}
+}
+
+// readAccountFeed is the account's whole feed, read with the feed key, page
+// by page.
+func readAccountFeed(ctx context.Context, keys keyFile) []verdifax.SignalEvent {
+	feed, newErr := verdifax.NewClient(verdifax.Config{BaseURL: baseURL(), APIKey: keys.Feed.Secret})
+	must(newErr)
+	events := []verdifax.SignalEvent{}
+	var after int64
+	for {
+		page, pageErr := feed.GetSignals(ctx, &verdifax.GetSignalsOptions{After: after, Limit: 500})
+		must(pageErr)
+		events = append(events, page.Events...)
+		if len(page.Events) < 500 {
+			break
+		}
+		after = page.NextAfter
+	}
+	return events
+}
+
+// historyCheck is the re-check of a saved sign-off history, with its head
+// age limit, and the reason for the limit on the line after (R246).
+func historyCheck(path string) (string, string) {
+	return fmt.Sprintf("verdifax-verify --signoff-history %s --signoff-head-max-age %s", path, savedHeadMaxAge), "  " + historyAgeReason
+}
+
+// feedCheck is the re-check of the saved feed, with its head age limit, and
+// the reason for the limit on the line after (R246).
+func feedCheck() (string, string) {
+	return "verdifax-verify --signals signals.json --feed-head-max-age " + savedHeadMaxAge, "  " + feedAgeReason
 }
 
 // ── sign-off ───────────────────────────────────────────────────────────────
@@ -891,7 +995,9 @@ func cmdSignOff(ctx context.Context, jobID, decision, note, receiptRunID string)
 	writeText(filepath.Join(folder, "signoff-history.json"), string(history))
 	fmt.Printf("sign-off %s recorded as sequence %d, hash %s\n", decision, record.Sequence, record.SignOffHash)
 	fmt.Printf("verify: verdifax-verify --signoff %s --approver-key approver.txt %s\n", filepath.Join(folder, "signoffs.json"), filepath.Join(folder, recordFile))
-	fmt.Printf("verify: verdifax-verify --signoff-history %s\n", filepath.Join(folder, "signoff-history.json"))
+	historyLine, historyReason := historyCheck(filepath.Join(folder, "signoff-history.json"))
+	fmt.Println("verify: " + historyLine)
+	fmt.Println(historyReason)
 }
 
 // ── feed ───────────────────────────────────────────────────────────────────
@@ -990,27 +1096,13 @@ func cmdPublication(ctx context.Context, jobID, receipt string, publish bool) {
 	if publish && shown != nil {
 		fmt.Printf("public link: %s\n", shown.VerifyURL)
 	}
-	fmt.Println("each decision is an event in the account's feed; after feed, verify: verdifax-verify --signals signals.json")
+	feedLine, feedReason := feedCheck()
+	fmt.Println("each decision is an event in the account's feed; after feed, verify: " + feedLine)
+	fmt.Println(feedReason)
 }
 
 func cmdFeed(ctx context.Context) {
-	keys := loadKeys()
-	feed, newErr := verdifax.NewClient(verdifax.Config{BaseURL: baseURL(), APIKey: keys.Feed.Secret})
-	must(newErr)
-	var events []verdifax.SignalEvent
-	var after int64
-	for {
-		page, pageErr := feed.GetSignals(ctx, &verdifax.GetSignalsOptions{After: after, Limit: 500})
-		must(pageErr)
-		events = append(events, page.Events...)
-		if len(page.Events) < 500 {
-			break
-		}
-		after = page.NextAfter
-	}
-	if events == nil {
-		events = []verdifax.SignalEvent{}
-	}
+	events := readAccountFeed(ctx, loadKeys())
 	writeJSON("signals.json", events)
 	kinds := map[string]int{}
 	for _, e := range events {
@@ -1026,7 +1118,9 @@ func cmdFeed(ctx context.Context) {
 		parts = append(parts, fmt.Sprintf("%s %d", k, kinds[k]))
 	}
 	fmt.Printf("%d events in the feed: %s\n", len(events), strings.Join(parts, ", "))
-	fmt.Println("verify: verdifax-verify --signals signals.json")
+	feedLine, feedReason := feedCheck()
+	fmt.Println("verify: " + feedLine)
+	fmt.Println(feedReason)
 }
 
 // ── verify commands ────────────────────────────────────────────────────────
@@ -1043,8 +1137,15 @@ func printVerifyCommands(jobID string) {
 	if _, statErr := os.Stat(filepath.Join(folder, "signoffs.json")); statErr == nil {
 		fmt.Printf("  verdifax-verify --signoff %s --approver-key approver.txt %s\n", filepath.Join(folder, "signoffs.json"), filepath.Join(folder, "steps", "verdict.json"))
 	}
+	if _, statErr := os.Stat(filepath.Join(folder, "signoff-history.json")); statErr == nil {
+		history, historyReason := historyCheck(filepath.Join(folder, "signoff-history.json"))
+		fmt.Println("  " + history)
+		fmt.Println(historyReason)
+	}
 	if _, statErr := os.Stat("signals.json"); statErr == nil {
-		fmt.Println("  verdifax-verify --signals signals.json")
+		feedLine, feedReason := feedCheck()
+		fmt.Println("  " + feedLine)
+		fmt.Println(feedReason)
 	}
 }
 

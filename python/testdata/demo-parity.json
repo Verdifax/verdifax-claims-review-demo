@@ -24,12 +24,14 @@
       ],
       "writes": [
         "records/<job_id>/steps/<step>.json (the sealed records, the folder verdifax-verify --job reads)",
+        "records/<job_id>/steps/<step>.deleted.json (a deleted step's tombstone: the run.deleted entry from the account feed, which verdifax-verify --job reads in the step's place)",
         "records/<job_id>/payloads/<step>.json",
         "records/<job_id>/answers/<step>.txt (the model's exact answer, which hashes to the step's sealed ai_output_hash)",
         "records/<job_id>/traces/<step>.txt (the text the server's AI review checked, when the server returned it)",
         "records/<job_id>/job.json",
         "records/stopped-<run_id>/receipt.json",
         "records/stopped-<run_id>/steps/<step>.json (every step sealed before the stop)",
+        "records/stopped-<run_id>/steps/<step>.deleted.json (a deleted step's tombstone: the run.deleted entry from the account feed, which verdifax-verify --job reads in the step's place)",
         "records/stopped-<run_id>/payloads/<step>.json (every step, the stopped one included)",
         "records/stopped-<run_id>/answers/<step>.txt",
         "records/stopped-<run_id>/traces/<step>.txt (when the server returned one)",
@@ -103,7 +105,7 @@
     "route_rule": "claims-review/v1/rule-check",
     "route_verdict": "claims-review/v1/verdict",
     "object_prefix": "claims-review/v1/",
-    "min_verifier": "v0.28.0",
+    "min_verifier": "v0.34.0",
     "program_id_source": "verdifax-claims-review-demo/program/v1",
     "registry_record_hash_source": "verdifax-claims-review-demo/registry/v1",
     "decision_kinds": [
@@ -122,7 +124,11 @@
     "policy_file": "claims-review-v3.json",
     "route_claims": "claims-review/v1/claims",
     "claims_prompt": "claims-prompt-v1.txt",
-    "verdict_prompt": "verdict-prompt-v1.txt"
+    "verdict_prompt": "verdict-prompt-v1.txt",
+    "deleted_step_suffix": ".deleted.json",
+    "saved_head_max_age": "168h",
+    "history_age_reason": "(168h: a saved history is checked as of when it was fetched; raise the limit for an older copy, or run sign-off again to fetch it fresh)",
+    "feed_age_reason": "(168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh)"
   },
   "steps": {
     "intake": "intake",

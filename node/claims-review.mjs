@@ -46,7 +46,7 @@ const ROUTE_RULE = "claims-review/v1/rule-check";
 const ROUTE_VERDICT = "claims-review/v1/verdict";
 const OBJECT_PREFIX = "claims-review/v1/";
 const LEVELS = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI"];
-const MIN_VERIFIER = "v0.28.0";
+const MIN_VERIFIER = "v0.34.0";
 // A stopped step's records live in records/stopped-<run_id>/, and the
 // model's exact answers in answers/ beside each job's steps/.
 const STOPPED_FOLDER_PREFIX = "stopped-";
@@ -60,6 +60,15 @@ const POLICY_FILE = "claims-review-v3.json";
 // explaining the verdict code decided.
 const CLAIMS_PROMPT = "claims-prompt-v1.txt";
 const VERDICT_PROMPT = "verdict-prompt-v1.txt";
+// A step whose record was deleted is written as its tombstone,
+// steps/<step>.deleted.json: the run.deleted entry from the account feed,
+// which verdifax-verify --job reads in the step's place (R250).
+const DELETED_STEP_SUFFIX = ".deleted.json";
+// A saved sign-off history or feed is checked as of when it was fetched, so
+// every printed re-check states the limit on its head statement's age (R246).
+const SAVED_HEAD_MAX_AGE = "168h";
+const HISTORY_AGE_REASON = "(168h: a saved history is checked as of when it was fetched; raise the limit for an older copy, or run sign-off again to fetch it fresh)";
+const FEED_AGE_REASON = "(168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh)";
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const sha256Hex = (data) => createHash("sha256").update(data).digest("hex");
@@ -523,7 +532,12 @@ async function stop(agent, jobId, step, runIds, payloads, answerTexts, draftPath
   const folder = stoppedFolder(stopped); // named by the run, so two stops never share a folder
   writeJSON(join(folder, "receipt.json"), await stopReceipt(agent, row.status, stopped));
   mkdirSync(join(folder, "steps"), { recursive: true });
-  for (const [sealedStep, runId] of Object.entries(runIds)) writeFileSync(join(folder, "steps", `${sealedStep}.json`), await agent.getRunArtifacts(runId));
+  // A sealed step whose record was deleted since is kept as its tombstone.
+  const deleted = Object.keys(runIds).length > 0 ? deletedSteps(await readAccountFeed(loadKeys()), jobId) : {};
+  writeDeletedSteps(folder, Object.fromEntries(Object.entries(deleted).filter(([s]) => s in runIds)));
+  for (const [sealedStep, runId] of Object.entries(runIds)) {
+    if (!(sealedStep in deleted)) writeFileSync(join(folder, "steps", `${sealedStep}.json`), await agent.getRunArtifacts(runId));
+  }
   mkdirSync(join(folder, "payloads"), { recursive: true });
   for (const [name, payload] of Object.entries(payloads)) writeFileSync(join(folder, "payloads", `${name}.json`), canonical(payload));
   saveAnswers(folder, answerTexts);
@@ -541,15 +555,19 @@ async function stop(agent, jobId, step, runIds, payloads, answerTexts, draftPath
 }
 
 async function saveJobRecords(agent, jobId, out, runIds, payloads) {
-  const rows = (await agent.exportRuns({ job_id: jobId })).runs;
-  if (rows.length !== Object.keys(runIds).length) {
-    fail(`the export lists ${rows.length} records for ${jobId}, the program sealed ${Object.keys(runIds).length}`);
+  // A deleted step's record is gone from the export; its tombstone in the
+  // account feed stands in its place (R250).
+  const deleted = Object.fromEntries(Object.entries(deletedSteps(await readAccountFeed(loadKeys()), jobId)).filter(([s]) => s in runIds));
+  const rows = (await agent.exportRuns({ job_id: jobId })).runs.filter((r) => !(r.step_id in deleted));
+  if (rows.length + Object.keys(deleted).length !== Object.keys(runIds).length) {
+    fail(`the export lists ${rows.length} records and the feed ${Object.keys(deleted).length} deleted steps for ${jobId}, the program sealed ${Object.keys(runIds).length}`);
   }
   // The sealed step records alone sit in steps/, the folder verdifax-verify
   // --job reads: it takes every .json file there as a record, so the
   // summary, the sign-offs and the payloads live beside that folder.
   mkdirSync(join(out, "steps"), { recursive: true });
   mkdirSync(join(out, "payloads"), { recursive: true });
+  writeDeletedSteps(out, deleted);
   for (const row of rows) {
     if (row.status in STOP_KINDS) writeJSON(join(out, "steps", `${row.step_id}.json`), await stopReceipt(agent, row.status, row.run_id));
     else writeFileSync(join(out, "steps", `${row.step_id}.json`), await agent.getRunArtifacts(row.run_id));
@@ -558,6 +576,46 @@ async function saveJobRecords(agent, jobId, out, runIds, payloads) {
   // payload hash from the file.
   for (const [step, payload] of Object.entries(payloads)) writeFileSync(join(out, "payloads", `${step}.json`), canonical(payload));
 }
+
+// The steps of job jobId whose records were deleted, each with its
+// tombstone: the entry of every run.deleted event naming the job, by its
+// step. A run.sealed event whose record was deleted carries the tombstone
+// in data.deleted with a null entry; it is not the deletion and is passed
+// over, as is a deletion of another job or of no job.
+function deletedSteps(events, jobId) {
+  const out = {};
+  for (const e of events) {
+    const entry = e?.data?.entry;
+    if (e?.data?.kind !== "run.deleted" || !entry || entry.job_id !== jobId || !entry.step_id) continue;
+    out[entry.step_id] = entry;
+  }
+  return out;
+}
+
+// Writes each deleted step's tombstone as <folder>/steps/<step>.deleted.json,
+// the server's exact text, beside the step records verdifax-verify --job reads.
+function writeDeletedSteps(folder, deleted) {
+  for (const [step, entry] of Object.entries(deleted)) writeJSON(join(folder, "steps", `${step}${DELETED_STEP_SUFFIX}`), entry);
+}
+
+// The account's whole feed, read with the feed key, page by page.
+async function readAccountFeed(keys) {
+  const feed = new VerdifaxClient({ baseURL: baseURL(), apiKey: keys.feed.secret });
+  const events = [];
+  let after = 0;
+  for (;;) {
+    const page = await feed.getSignals({ after, limit: 500 });
+    events.push(...page.events);
+    if (page.events.length < 500) break;
+    after = page.next_after;
+  }
+  return events;
+}
+
+// The re-check of a saved sign-off history or feed, with its head age limit,
+// and the reason for the limit on the line after (R246).
+const historyCheck = (path) => [`verdifax-verify --signoff-history ${path} --signoff-head-max-age ${SAVED_HEAD_MAX_AGE}`, `  ${HISTORY_AGE_REASON}`];
+const feedCheck = () => [`verdifax-verify --signals signals.json --feed-head-max-age ${SAVED_HEAD_MAX_AGE}`, `  ${FEED_AGE_REASON}`];
 
 // ── sign-off ───────────────────────────────────────────────────────────────
 
@@ -591,7 +649,9 @@ async function cmdSignOff(jobId, decision, note, receiptRunId) {
   console.log(`sign-off ${decision} recorded as sequence ${record.sequence}, hash ${record.signoff_hash}`);
   const recordFile = receiptRunId ? join(folder, "receipt.json") : join(folder, "steps", "verdict.json");
   console.log(`verify: verdifax-verify --signoff ${join(folder, "signoffs.json")} --approver-key approver.txt ${recordFile}`);
-  console.log(`verify: verdifax-verify --signoff-history ${join(folder, "signoff-history.json")}`);
+  const [history, historyReason] = historyCheck(join(folder, "signoff-history.json"));
+  console.log(`verify: ${history}`);
+  console.log(historyReason);
 }
 
 // ── feed ───────────────────────────────────────────────────────────────────
@@ -642,25 +702,20 @@ async function publication(jobId, receipt, publish) {
     const shown = published.verdict || published.receipt || published[Object.keys(published).sort()[0]];
     console.log(`public link: ${shown.verify_url}`);
   }
-  console.log("each decision is an event in the account's feed; after `feed`, verify: verdifax-verify --signals signals.json");
+  const [feed, feedReason] = feedCheck();
+  console.log(`each decision is an event in the account's feed; after \`feed\`, verify: ${feed}`);
+  console.log(feedReason);
 }
 
 async function cmdFeed() {
-  const keys = loadKeys();
-  const feed = new VerdifaxClient({ baseURL: baseURL(), apiKey: keys.feed.secret });
-  const events = [];
-  let after = 0;
-  for (;;) {
-    const page = await feed.getSignals({ after, limit: 500 });
-    events.push(...page.events);
-    if (page.events.length < 500) break;
-    after = page.next_after;
-  }
+  const events = await readAccountFeed(loadKeys());
   writeJSON("signals.json", events);
   const kinds = {};
   for (const e of events) kinds[e.data.kind] = (kinds[e.data.kind] || 0) + 1;
   console.log(`${events.length} events in the feed: ${Object.keys(kinds).sort().map((k) => `${k} ${kinds[k]}`).join(", ")}`);
-  console.log("verify: verdifax-verify --signals signals.json");
+  const [feed, feedReason] = feedCheck();
+  console.log(`verify: ${feed}`);
+  console.log(feedReason);
 }
 
 // ── verify commands ────────────────────────────────────────────────────────
@@ -674,7 +729,16 @@ function printVerifyCommands(jobId) {
   if (existsSync(join(folder, "signoffs.json"))) {
     console.log(`  verdifax-verify --signoff ${join(folder, "signoffs.json")} --approver-key approver.txt ${join(folder, "steps", "verdict.json")}`);
   }
-  if (existsSync("signals.json")) console.log("  verdifax-verify --signals signals.json");
+  if (existsSync(join(folder, "signoff-history.json"))) {
+    const [history, historyReason] = historyCheck(join(folder, "signoff-history.json"));
+    console.log(`  ${history}`);
+    console.log(historyReason);
+  }
+  if (existsSync("signals.json")) {
+    const [feed, feedReason] = feedCheck();
+    console.log(`  ${feed}`);
+    console.log(feedReason);
+  }
 }
 
 // ── main ───────────────────────────────────────────────────────────────────
@@ -726,7 +790,10 @@ async function main() {
   }
 }
 
-export { canonical, draftClassification, loadRules, readInput, RULE_SET, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun };
+export {
+  canonical, DELETED_STEP_SUFFIX, deletedSteps, draftClassification, FEED_AGE_REASON, HISTORY_AGE_REASON, loadRules, MIN_VERIFIER, printVerifyCommands,
+  readInput, RULE_SET, SAVED_HEAD_MAX_AGE, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
+};
 
 // Node loads the program by its real path, so the path it was started with is
 // compared as a real path too: through a linked folder (macOS's /tmp is one)

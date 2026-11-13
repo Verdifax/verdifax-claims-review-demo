@@ -57,7 +57,7 @@ ROUTE_VERDICT = "claims-review/v1/verdict"
 OBJECT_PREFIX = "claims-review/v1/"
 LEVELS = ("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
 VERDICTS = ("pass", "fail", "unanswered")
-MIN_VERIFIER = "v0.28.0"
+MIN_VERIFIER = "v0.34.0"
 # A stopped step's records live in records/stopped-<run_id>/, and the
 # model's exact answers in answers/ beside each job's steps/.
 STOPPED_FOLDER_PREFIX = "stopped-"
@@ -72,6 +72,15 @@ POLICY_FILE = "claims-review-v3.json"
 # and explaining the verdict code decided.
 CLAIMS_PROMPT = "claims-prompt-v1.txt"
 VERDICT_PROMPT = "verdict-prompt-v1.txt"
+# A step whose record was deleted is written as its tombstone,
+# steps/<step>.deleted.json: the run.deleted entry from the account feed,
+# which verdifax-verify --job reads in the step's place (R250).
+DELETED_STEP_SUFFIX = ".deleted.json"
+# A saved sign-off history or feed is checked as of when it was fetched, so
+# every printed re-check states the limit on its head statement's age (R246).
+SAVED_HEAD_MAX_AGE = "168h"
+HISTORY_AGE_REASON = "(168h: a saved history is checked as of when it was fetched; raise the limit for an older copy, or run sign-off again to fetch it fresh)"
+FEED_AGE_REASON = "(168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh)"
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 
@@ -519,7 +528,12 @@ def stop(agent: verdifax.VerdifaxClient, job_id: str, step: str, run_ids: dict[s
     stopped = row.run_id
     folder = stopped_folder(stopped)  # named by the run, so two stops never share a folder
     write_json(folder / "receipt.json", stop_receipt(agent, row.status, stopped))
+    # A sealed step whose record was deleted since is kept as its tombstone.
+    deleted = deleted_steps(read_account_feed(load_keys()), job_id) if run_ids else {}
+    write_deleted_steps(folder, {s: t for s, t in deleted.items() if s in run_ids})
     for sealed_step, run_id in run_ids.items():
+        if sealed_step in deleted:
+            continue
         (folder / "steps").mkdir(parents=True, exist_ok=True)
         (folder / "steps" / ("%s.json" % sealed_step)).write_text(agent.get_run_artifacts(run_id), encoding="utf-8")
     (folder / "payloads").mkdir(parents=True, exist_ok=True)
@@ -539,13 +553,18 @@ def stop(agent: verdifax.VerdifaxClient, job_id: str, step: str, run_ids: dict[s
 
 
 def save_job_records(agent: verdifax.VerdifaxClient, job_id: str, out: Path, run_ids: dict[str, int], payloads: dict[str, Any]) -> None:
-    rows = agent.export_runs(job_id=job_id).runs
-    if len(rows) != len(run_ids):
-        fail("the export lists %d records for %s, the program sealed %d" % (len(rows), job_id, len(run_ids)))
+    # A deleted step's record is gone from the export; its tombstone in the
+    # account feed stands in its place (R250).
+    deleted = {s: t for s, t in deleted_steps(read_account_feed(load_keys()), job_id).items() if s in run_ids}
+    rows = [r for r in agent.export_runs(job_id=job_id).runs if r.step_id not in deleted]
+    if len(rows) + len(deleted) != len(run_ids):
+        fail("the export lists %d records and the feed %d deleted steps for %s, the program sealed %d"
+             % (len(rows), len(deleted), job_id, len(run_ids)))
     # The sealed step records alone sit in steps/, the folder verdifax-verify
     # --job reads: it takes every .json file there as a record, so the
     # summary, the sign-offs and the payloads live beside that folder.
     (out / "steps").mkdir(parents=True, exist_ok=True)
+    write_deleted_steps(out, deleted)
     for row in rows:
         if row.status in STOP_KINDS:
             write_json(out / "steps" / ("%s.json" % row.step_id), stop_receipt(agent, row.status, row.run_id))
@@ -556,6 +575,56 @@ def save_job_records(agent: verdifax.VerdifaxClient, job_id: str, out: Path, run
     (out / "payloads").mkdir(parents=True, exist_ok=True)
     for step, payload in payloads.items():
         (out / "payloads" / ("%s.json" % step)).write_text(canonical(payload), encoding="utf-8")
+
+
+def deleted_steps(events: list[Any], job_id: str) -> dict[str, Any]:
+    """The steps of job job_id whose records were deleted, each with its
+    tombstone: the entry of every run.deleted event naming the job, by its
+    step. A run.sealed event whose record was deleted carries the tombstone in
+    data.deleted with a null entry; it is not the deletion and is passed over,
+    as is a deletion of another job or of no job."""
+    out: dict[str, Any] = {}
+    for e in events:
+        data = e.get("data") or {}
+        entry = data.get("entry")
+        if data.get("kind") != "run.deleted" or not entry or entry.get("job_id") != job_id or not entry.get("step_id"):
+            continue
+        out[entry["step_id"]] = entry
+    return out
+
+
+def write_deleted_steps(folder: Path, deleted: dict[str, Any]) -> None:
+    """Writes each deleted step's tombstone as <folder>/steps/<step>.deleted.json,
+    every field as the server sent it, beside the step records verdifax-verify
+    --job reads."""
+    for step, entry in deleted.items():
+        write_json(folder / "steps" / ("%s%s" % (step, DELETED_STEP_SUFFIX)), entry)
+
+
+def read_account_feed(keys: dict[str, Any]) -> list[Any]:
+    """The account's whole feed, read with the feed key, page by page."""
+    feed = verdifax.VerdifaxClient(base_url=base_url(), api_key=keys["feed"]["secret"])
+    events: list[Any] = []
+    after = 0
+    while True:
+        page = feed.get_signals(after=after, limit=500)
+        events.extend(page["events"])
+        if len(page["events"]) < 500:
+            break
+        after = page["next_after"]
+    return events
+
+
+def history_check(path: Path) -> tuple[str, str]:
+    """The re-check of a saved sign-off history, with its head age limit, and
+    the reason for the limit on the line after (R246)."""
+    return ("verdifax-verify --signoff-history %s --signoff-head-max-age %s" % (path, SAVED_HEAD_MAX_AGE), "  " + HISTORY_AGE_REASON)
+
+
+def feed_check() -> tuple[str, str]:
+    """The re-check of the saved feed, with its head age limit, and the reason
+    for the limit on the line after (R246)."""
+    return ("verdifax-verify --signals signals.json --feed-head-max-age %s" % SAVED_HEAD_MAX_AGE, "  " + FEED_AGE_REASON)
 
 
 # ── sign-off ───────────────────────────────────────────────────────────────
@@ -588,7 +657,9 @@ def cmd_sign_off(args: argparse.Namespace) -> None:
     print("sign-off %s recorded as sequence %s, hash %s" % (args.decision, record["sequence"], record["signoff_hash"]))
     print("verify: verdifax-verify --signoff %s --approver-key approver.txt %s" % (folder / "signoffs.json",
           folder / "receipt.json" if args.receipt else folder / "steps" / "verdict.json"))
-    print("verify: verdifax-verify --signoff-history %s" % (folder / "signoff-history.json"))
+    history, history_reason = history_check(folder / "signoff-history.json")
+    print("verify: " + history)
+    print(history_reason)
 
 
 # ── feed ───────────────────────────────────────────────────────────────────
@@ -636,7 +707,9 @@ def publication(args: argparse.Namespace, publish: bool) -> None:
     if publish:
         shown = published.get("verdict") or published.get("receipt") or published[sorted(published)[0]]
         print("public link: %s" % shown["verify_url"])
-    print("each decision is an event in the account's feed; after `feed`, verify: verdifax-verify --signals signals.json")
+    feed, feed_reason = feed_check()
+    print("each decision is an event in the account's feed; after `feed`, verify: " + feed)
+    print(feed_reason)
 
 
 def cmd_publish(args: argparse.Namespace) -> None:
@@ -648,22 +721,15 @@ def cmd_unpublish(args: argparse.Namespace) -> None:
 
 
 def cmd_feed(_: argparse.Namespace) -> None:
-    keys = load_keys()
-    feed = verdifax.VerdifaxClient(base_url=base_url(), api_key=keys["feed"]["secret"])
-    events: list[Any] = []
-    after = 0
-    while True:
-        page = feed.get_signals(after=after, limit=500)
-        events.extend(page["events"])
-        if len(page["events"]) < 500:
-            break
-        after = page["next_after"]
+    events = read_account_feed(load_keys())
     write_json(Path("signals.json"), events)
     kinds: dict[str, int] = {}
     for e in events:
         kinds[e["data"]["kind"]] = kinds.get(e["data"]["kind"], 0) + 1
     print("%d events in the feed: %s" % (len(events), ", ".join("%s %d" % kv for kv in sorted(kinds.items()))))
-    print("verify: verdifax-verify --signals signals.json")
+    feed, feed_reason = feed_check()
+    print("verify: " + feed)
+    print(feed_reason)
 
 
 # ── verify commands ────────────────────────────────────────────────────────
@@ -676,8 +742,14 @@ def print_verify_commands(job_id: str) -> None:
     print("  verdifax-verify --account-policy %s %s" % (REPO / "policy" / POLICY_FILE, folder / "steps" / "verdict.json"))
     if (folder / "signoffs.json").exists():
         print("  verdifax-verify --signoff %s --approver-key approver.txt %s" % (folder / "signoffs.json", folder / "steps" / "verdict.json"))
+    if (folder / "signoff-history.json").exists():
+        history, history_reason = history_check(folder / "signoff-history.json")
+        print("  " + history)
+        print(history_reason)
     if Path("signals.json").exists():
-        print("  verdifax-verify --signals signals.json")
+        feed, feed_reason = feed_check()
+        print("  " + feed)
+        print(feed_reason)
 
 
 def cmd_verify_commands(args: argparse.Namespace) -> None:

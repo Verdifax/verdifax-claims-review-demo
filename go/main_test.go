@@ -287,3 +287,135 @@ func TestEveryInputFileReadsAsItsExactBytes(t *testing.T) {
 		}
 	}
 }
+
+// The deleted-step cases every language runs, from one file (R250).
+type deletedStepCases struct {
+	JobID  string                     `json:"job_id"`
+	Events []verdifax.SignalEvent     `json:"events"`
+	Want   map[string]json.RawMessage `json:"want"`
+}
+
+func loadDeletedStepCases(t *testing.T) deletedStepCases {
+	t.Helper()
+	text, readErr := os.ReadFile(filepath.Join(repo, "testdata", "deleted-step-cases.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var cases deletedStepCases
+	if parseErr := json.Unmarshal(text, &cases); parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	return cases
+}
+
+// parityConstants reads the constants demo-parity.json names.
+func parityConstants(t *testing.T) map[string]any {
+	t.Helper()
+	text, readErr := os.ReadFile(filepath.Join(repo, "demo-parity.json"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var parity struct {
+		Constants map[string]any `json:"constants"`
+	}
+	if parseErr := json.Unmarshal(text, &parity); parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	return parity.Constants
+}
+
+func sameJSON(t *testing.T, a, b []byte) bool {
+	t.Helper()
+	var x, y any
+	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
+		return false
+	}
+	return reflect.DeepEqual(x, y)
+}
+
+func TestADeletedStepIsReadFromItsJobsRunDeletedEventsOnly(t *testing.T) {
+	cases := loadDeletedStepCases(t)
+	got := deletedSteps(cases.Events, cases.JobID)
+	if len(got) != len(cases.Want) {
+		t.Fatalf("deleted steps %v, want %v", got, cases.Want)
+	}
+	for step, entry := range cases.Want {
+		if !sameJSON(t, got[step], entry) {
+			t.Fatalf("step %s: tombstone %s, want %s", step, got[step], entry)
+		}
+	}
+	if other := deletedSteps(cases.Events, "claims-review-no-such-job"); len(other) != 0 {
+		t.Fatalf("another job has no deleted steps here, got %v", other)
+	}
+	if parityConstants(t)["deleted_step_suffix"] != deletedStepSuffix {
+		t.Fatalf("deletedStepSuffix %s differs from demo-parity.json", deletedStepSuffix)
+	}
+}
+
+func TestADeletedStepsTombstoneIsWrittenBesideTheStepsAsTheServerSentIt(t *testing.T) {
+	cases := loadDeletedStepCases(t)
+	folder := t.TempDir()
+	deleted := deletedSteps(cases.Events, cases.JobID)
+	writeDeletedSteps(folder, deleted)
+	files, _ := filepath.Glob(filepath.Join(folder, "steps", "*"))
+	if len(files) != 2 || filepath.Base(files[0]) != "rule-02.deleted.json" || filepath.Base(files[1]) != "verdict.deleted.json" {
+		t.Fatalf("steps/ holds %v, want rule-02.deleted.json and verdict.deleted.json", files)
+	}
+	for _, step := range []string{"rule-02", "verdict"} {
+		written, readErr := os.ReadFile(filepath.Join(folder, "steps", step+deletedStepSuffix))
+		if readErr != nil || string(written) != string(deleted[step])+"\n" {
+			t.Fatalf("%s: the tombstone is not the server's exact bytes (%v):\n%s", step, readErr, written)
+		}
+		// The deleted step's sealed links are part of those bytes (round 61).
+		if !bytes.Contains(written, []byte(`"job_links"`)) || !sameJSON(t, written, cases.Want[step]) {
+			t.Fatalf("%s: the tombstone lacks the job_links the server sealed:\n%s", step, written)
+		}
+	}
+}
+
+func TestEveryPrintedRecheckOfASavedHistoryOrFeedStatesItsHeadAgeLimit(t *testing.T) {
+	here, _ := os.Getwd()
+	folder := t.TempDir()
+	if chdirErr := os.Chdir(folder); chdirErr != nil {
+		t.Fatal(chdirErr)
+	}
+	defer func() { _ = os.Chdir(here) }()
+	must(os.MkdirAll(filepath.Join("records", "job-1"), 0o755))
+	writeText(filepath.Join("records", "job-1", "signoff-history.json"), "[]")
+	writeText("signals.json", "[]")
+	reader, writer, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		t.Fatal(pipeErr)
+	}
+	stdout := os.Stdout
+	os.Stdout = writer
+	printVerifyCommands("job-1")
+	os.Stdout = stdout
+	_ = writer.Close()
+	var out bytes.Buffer
+	_, _ = out.ReadFrom(reader)
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	constants := parityConstants(t)
+	if constants["min_verifier"] != minVerifier || lines[0] != fmt.Sprintf("verify with verdifax-verify %s or later:", minVerifier) {
+		t.Fatalf("first line %q, min_verifier %v", lines[0], constants["min_verifier"])
+	}
+	if constants["saved_head_max_age"] != savedHeadMaxAge || constants["history_age_reason"] != historyAgeReason || constants["feed_age_reason"] != feedAgeReason {
+		t.Fatal("the head age limit or its reasons differ from demo-parity.json")
+	}
+	want := map[string][2]string{
+		"--signoff-history": {"  verdifax-verify --signoff-history " + filepath.Join("records", "job-1", "signoff-history.json") + " --signoff-head-max-age " + savedHeadMaxAge, "  " + historyAgeReason},
+		"--signals":         {"  verdifax-verify --signals signals.json --feed-head-max-age " + savedHeadMaxAge, "  " + feedAgeReason},
+	}
+	for mode, pair := range want {
+		found := false
+		for i, line := range lines {
+			if strings.Contains(line, mode) {
+				found = line == pair[0] && i+1 < len(lines) && lines[i+1] == pair[1]
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("the %s re-check does not state its head age limit and reason:\n%s", mode, out.String())
+		}
+	}
+}

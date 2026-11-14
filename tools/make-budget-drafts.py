@@ -5,17 +5,19 @@ same on every run (a fixed seed, no clock).
 Both are release notes for the invented product Quillstone Ledger, written by
 Verdifax in the plain style of the other samples, long on purpose:
 
-  samples/budget-over-run-limit.md    about 130,000 tokens, so its first model
-                                      step declares more than the per-run limit
-                                      of 100,000 and is halted (ccv_halt)
-  samples/budget-over-daily-limit.md  about 80,000 tokens, so each step stays
-                                      under the per-run limit while the steps
-                                      of one review together pass the account's
-                                      daily limit of 1,000,000 (macc_halt)
+  samples/budget-over-run-limit.md    176,949 tokens in its first model step,
+                                      more than the per-run limit of 100,000,
+                                      so that step is halted (ccv_halt)
+  samples/budget-over-daily-limit.md  84,905 to 85,018 tokens a step, so each
+                                      stays under the per-run limit while the
+                                      steps of one review together pass the
+                                      account's daily limit of 1,000,000 at
+                                      step 12, rule-11 (macc_halt)
 
-The token counts are estimates; the demo driver counts the exact tokens with
-the model's token counter before sending either draft, and stops if a draft
-would not trigger the stop it is for.
+The counts are Fable 5.1's own, measured on November 14, 2026 with
+tools/check-budget-drafts.py, which the demo driver runs again before sending
+either draft. An estimate is never used: the first over-day draft, sized by
+one, counted about 35% larger and would have been halted by the per-run limit.
 
 Usage: python3 tools/make-budget-drafts.py
 """
@@ -101,4 +103,4 @@ def write(name: str, purpose: str, seed: int, target_chars: int) -> None:
 
 if __name__ == "__main__":
     write("budget-over-run-limit.md", "its first model step declares more tokens than the per-run limit of 100,000", 62001, 546_000)
-    write("budget-over-daily-limit.md", "each step stays under the per-run limit while one review's steps together pass the daily limit of 1,000,000", 62002, 336_000)
+    write("budget-over-daily-limit.md", "each step stays under the per-run limit while one review's steps together pass the daily limit of 1,000,000", 62002, 258_000)

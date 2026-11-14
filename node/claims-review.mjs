@@ -32,7 +32,9 @@
 //   claims-review feed
 //   claims-review verify-commands JOB_ID
 //
-// Environment: VERDIFAX_BASE_URL (default https://api.verdifax.com).
+// Environment: VERDIFAX_BASE_URL (default https://api.verdifax.com);
+// CLAIMS_REVIEW_REGISTRY_RECORD_HASH, the registry record each step claims on a
+// server that enforces a program registry (default: the program's fixed value).
 // Files, in the working folder: demo-keys.json and approver-key.json (0600),
 // approver.txt, account-history.json, records/<job_id>/*.json with payloads/,
 // signals.json; approver-<name>-key.json (0600), approver-<name>.txt and
@@ -125,8 +127,25 @@ function canonical(value) {
 const PROGRAM_ID = sha256Hex("verdifax-claims-review-demo/program/v1");
 const REGISTRY_RECORD_HASH = sha256Hex("verdifax-claims-review-demo/registry/v1");
 
+// The program registry record every step claims. A server that enforces a
+// program registry, as Verdifax's hardware-attested endpoint does, admits a
+// step only when it claims the record its operator registered for this
+// program: CLAIMS_REVIEW_REGISTRY_RECORD_HASH names that record. Unset, the
+// program claims its fixed value, which a server with no enforced registry
+// seals as declared.
+function registryRecordHash(given) {
+  if (!given) return REGISTRY_RECORD_HASH;
+  if (!/^[0-9a-f]{64}$/.test(given)) fail("CLAIMS_REVIEW_REGISTRY_RECORD_HASH must be 64 lowercase hex characters");
+  return given;
+}
+
 const baseURL = () => (process.env.VERDIFAX_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, "");
-const isProduction = () => baseURL() === DEFAULT_BASE_URL;
+// Whether the server is on this machine (or, from a container, its host).
+// Recorded answers are allowed only there: every other server, Verdifax's
+// hosted one or its hardware-attested one, is live, and a review against it
+// asks the model.
+const LOCAL_HOSTS = ["127.0.0.1", "localhost", "::1", "host.docker.internal"];
+const isLocalServer = () => LOCAL_HOSTS.includes(new URL(baseURL()).hostname.replace(/^\[|\]$/g, ""));
 
 function fail(message) {
   console.error("claims-review:", message);
@@ -291,7 +310,7 @@ async function cmdSetup() {
 // Recorded answers for tests, refused against production.
 function loadAnswers(path) {
   if (!path) return null;
-  if (isProduction()) fail("--answers is for tests against a local server, never production");
+  if (!isLocalServer()) fail("--answers is for tests against a local server, never a live one");
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
@@ -390,6 +409,7 @@ function utcStamp() {
 }
 
 async function cmdReview(draftPath, model, answersPath, withoutActor) {
+  const registryRecord = registryRecordHash(process.env.CLAIMS_REVIEW_REGISTRY_RECORD_HASH);
   const keys = loadKeys();
   const agent = clientFor(keys.agent);
   const { rules, ruleSetHash } = loadRules();
@@ -420,7 +440,7 @@ async function cmdReview(draftPath, model, answersPath, withoutActor) {
   try {
     intake = await job.step("intake", {
       after: [], payload_text: canonical(intakePayload), program_id: PROGRAM_ID, route_id: ROUTE_INTAKE,
-      registry_record_hash: REGISTRY_RECORD_HASH, policy_context: policy("intake"),
+      registry_record_hash: registryRecord, policy_context: policy("intake"),
       // The gate step names its agent, as policy v4 requires of every step;
       // --without-actor leaves the name out on purpose, so the policy
       // refuses the draft here, before any model is called.
@@ -465,7 +485,7 @@ async function cmdReview(draftPath, model, answersPath, withoutActor) {
   try {
     claimsStep = await job.step("claims", {
       after: ["intake"], payload_text: canonical(claimsPayload), program_id: PROGRAM_ID, route_id: ROUTE_CLAIMS,
-      registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answerTexts.claims,
+      registry_record_hash: registryRecord, ai_output_text: answerTexts.claims,
       request_substance: usageSubstance({ input_tokens: listed.inputTokens, output_tokens: listed.outputTokens }),
       attested_context: {
         attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: listed.model, prompt_hash: claimsPromptHash,
@@ -501,7 +521,7 @@ async function cmdReview(draftPath, model, answersPath, withoutActor) {
     try {
       receipt = await job.step(rule.id, {
         after: ["claims"], payload_text: canonical(payload), program_id: PROGRAM_ID, route_id: ROUTE_RULE,
-        registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answerTexts[rule.id],
+        registry_record_hash: registryRecord, ai_output_text: answerTexts[rule.id],
         request_substance: usageSubstance({ input_tokens: answer.inputTokens, output_tokens: answer.outputTokens }),
         attested_context: {
           attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: answer.model, prompt_hash: promptHash,
@@ -548,7 +568,7 @@ async function cmdReview(draftPath, model, answersPath, withoutActor) {
   try {
     final = await job.step("verdict", {
       after: rules.map((r) => r.id), final: true, payload_text: canonical(verdictPayload), program_id: PROGRAM_ID,
-      route_id: ROUTE_VERDICT, registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answerTexts.verdict,
+      route_id: ROUTE_VERDICT, registry_record_hash: registryRecord, ai_output_text: answerTexts.verdict,
       request_substance: usageSubstance({ input_tokens: explained.inputTokens, output_tokens: explained.outputTokens }),
       attested_context: {
         attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: explained.model, prompt_hash: verdictPromptHash,
@@ -1096,7 +1116,7 @@ export {
   canonical, DELETED_STEP_SUFFIX, deletedSteps, draftClassification, FEED_AGE_REASON, HISTORY_AGE_REASON, loadRules, MIN_VERIFIER, printVerifyCommands,
   MODEL_RETRY_TRIES, readInput, RULE_SET, SAVED_HEAD_MAX_AGE, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
   approverFiles, approverNameError, clientFor, DATA_QUALITY_CHECKS, DATA_QUALITY_SOURCE, dataQuality, POLICY_FILE, REPO, replaceWithTombstone, RULE_SET_SHA256,
-  settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON, recordedUsage, withSigningKey, keyFor,
+  settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON, recordedUsage, withSigningKey, keyFor, registryRecordHash, REGISTRY_RECORD_HASH, isLocalServer,
 };
 
 // Node loads the program by its real path, so the path it was started with is

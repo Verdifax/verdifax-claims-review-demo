@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import pathlib
 import types
 import unittest
@@ -274,6 +275,36 @@ class Round62(unittest.TestCase):
         files = COMMANDS["approver_names"]["files"]
         private, public = cr.approver_files(files["name"])
         self.assertEqual((str(private), str(public)), (files["private_key"], files["public_key"]))
+
+    def test_the_registry_record_a_review_claims(self):
+        case = COMMANDS["registry_record"]
+        default = cr.sha256_hex(case["default_source"].encode())
+        self.assertEqual(cr.REGISTRY_RECORD_HASH, default)
+        self.assertEqual(cr.registry_record_hash(None), default)
+        self.assertEqual(cr.registry_record_hash(""), default)
+        self.assertEqual(cr.registry_record_hash(case["given"]), case["given"])
+        import contextlib
+        import io
+        for bad in case["invalid"]:
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+                cr.registry_record_hash(bad)
+            self.assertIn(case["error"], err.getvalue(), bad)
+
+    def test_recorded_answers_only_against_a_local_server(self):
+        case = COMMANDS["local_server"]
+        for url in case["local"]:
+            with mock.patch.dict(os.environ, {"VERDIFAX_BASE_URL": url}):
+                self.assertTrue(cr.is_local_server(), url)
+        import contextlib
+        import io
+        for url in case["live"]:
+            with mock.patch.dict(os.environ, {"VERDIFAX_BASE_URL": url}):
+                self.assertFalse(cr.is_local_server(), url)
+                err = io.StringIO()
+                with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+                    cr.Answers("some-answers.json")
+                self.assertIn(case["error"], err.getvalue(), url)
 
     def test_the_agent_request_key_in_the_keys_file(self):
         case = COMMANDS["request_key"]

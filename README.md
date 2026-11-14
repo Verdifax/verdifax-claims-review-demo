@@ -28,7 +28,7 @@ Every record and its place in the job is anchored on the public log, and `verdif
 
 You need a Verdifax account's owner key (ask for the free pilot account at [verdifax.com](https://verdifax.com)) and your own Anthropic API key. The model defaults to `claude-fable-5-1`; `--model` takes another id, and each step seals the model that actually answered. Model use is yours and is printed after each review at the published prices in [rules/model-prices-v1.json](rules/model-prices-v1.json).
 
-Pick a language and work in an empty folder; the program writes its keys and records there. Each language installs the exact versions this repository pins. Every program reads the owner key from `VERDIFAX_OWNER_KEY` at setup and the model key from `ANTHROPIC_API_KEY` at review; the R program also needs the `sodium` package, which signs its requests.
+Pick a language and work in an empty folder; the program writes its keys and records there. Each language installs the exact versions this repository pins. Every program reads the owner key from `VERDIFAX_OWNER_KEY` at setup and the model key from `ANTHROPIC_API_KEY` at review; the R program also needs the `sodium` package, which signs its requests. Against a server that enforces a program registry, as Verdifax's hardware-attested endpoint does, set `CLAIMS_REVIEW_REGISTRY_RECORD_HASH` to the record that server's operator registered for the program; unset, each step claims the program's fixed value.
 
 ```bash
 # Python

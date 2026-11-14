@@ -21,7 +21,8 @@
         "--without-actor"
       ],
       "env": [
-        "ANTHROPIC_API_KEY"
+        "ANTHROPIC_API_KEY",
+        "CLAIMS_REVIEW_REGISTRY_RECORD_HASH"
       ],
       "writes": [
         "records/<job_id>/steps/<step>.json (the sealed records, the folder verdifax-verify --job reads)",

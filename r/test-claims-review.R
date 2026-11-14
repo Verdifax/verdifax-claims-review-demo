@@ -173,6 +173,18 @@ check(all(vapply(names_case$valid, function(n) is.null(approver_name_error(n)), 
         all(vapply(names_case$invalid, function(n) identical(approver_name_error(n), names_case$error), logical(1))) &&
         identical(approver_files(names_case$files$name), c(names_case$files$private_key, names_case$files$public_key)),
       "approver names and files")
+registry_case <- command_cases$registry_record
+check(identical(REGISTRY_RECORD_HASH, sha256_hex(registry_case$default_source)) &&
+        identical(registry_record_hash("")$hash, REGISTRY_RECORD_HASH) && identical(registry_record_hash(NULL)$hash, REGISTRY_RECORD_HASH) &&
+        identical(registry_record_hash(registry_case$given)$hash, registry_case$given) &&
+        all(vapply(registry_case$invalid, function(bad) identical(registry_record_hash(bad)$error, registry_case$error), logical(1))),
+      "the registry record a review claims")
+local_case <- command_cases$local_server
+with_base <- function(url, f) { old <- Sys.getenv("VERDIFAX_BASE_URL", NA); Sys.setenv(VERDIFAX_BASE_URL = url); on.exit(if (is.na(old)) Sys.unsetenv("VERDIFAX_BASE_URL") else Sys.setenv(VERDIFAX_BASE_URL = old)); f() }
+check(all(vapply(local_case$local, function(u) with_base(u, is_local_server), logical(1))) &&
+        !any(vapply(local_case$live, function(u) with_base(u, is_local_server), logical(1))) &&
+        grepl(sprintf('fail("%s")', local_case$error), paste(readLines(file.path(REPO, "r", "claims-review.R")), collapse = "\n"), fixed = TRUE),
+      "recorded answers only against a local server")
 key_case <- command_cases$request_key
 check(identical(canonical(with_agent_signing_key(key_case$keys, key_case$rotated_to)), canonical(key_case$after_rotate)) &&
         identical(canonical(with_agent_signing_key(key_case$keys, NULL)), canonical(key_case$after_clear)) &&

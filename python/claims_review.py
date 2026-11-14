@@ -31,7 +31,9 @@ Commands (the same in every language of this repository):
   claims-review feed
   claims-review verify-commands JOB_ID
 
-Environment: VERDIFAX_BASE_URL (default https://api.verdifax.com).
+Environment: VERDIFAX_BASE_URL (default https://api.verdifax.com);
+CLAIMS_REVIEW_REGISTRY_RECORD_HASH, the registry record each step claims on a
+server that enforces a program registry (default: the program's fixed value).
 Files, in the working folder: demo-keys.json and approver-key.json (0600),
 approver.txt, account-history.json, records/<job_id>/*.json with payloads/,
 signals.json; approver-<name>-key.json (0600), approver-<name>.txt and
@@ -139,6 +141,21 @@ def canonical(value: Any) -> str:
 # Fixed identifiers, derived from fixed text so every language seals the same.
 PROGRAM_ID = sha256_hex(b"verdifax-claims-review-demo/program/v1")
 REGISTRY_RECORD_HASH = sha256_hex(b"verdifax-claims-review-demo/registry/v1")
+REGISTRY_RECORD_ENV = "CLAIMS_REVIEW_REGISTRY_RECORD_HASH"
+
+
+def registry_record_hash(given: Optional[str]) -> str:
+    """The program registry record every step claims. A server that enforces
+    a program registry, as Verdifax's hardware-attested endpoint does, admits
+    a step only when it claims the record its operator registered for this
+    program: CLAIMS_REVIEW_REGISTRY_RECORD_HASH names that record. Unset, the
+    program claims its fixed value, which a server with no enforced registry
+    seals as declared."""
+    if not given:
+        return REGISTRY_RECORD_HASH
+    if not re.fullmatch(r"[0-9a-f]{64}", given):
+        fail("CLAIMS_REVIEW_REGISTRY_RECORD_HASH must be 64 lowercase hex characters")
+    return given
 
 
 def load_rules() -> tuple[list[dict[str, str]], str]:
@@ -154,8 +171,16 @@ def base_url() -> str:
     return os.environ.get("VERDIFAX_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
 
 
-def is_production() -> bool:
-    return base_url() == DEFAULT_BASE_URL
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1", "host.docker.internal")
+
+
+def is_local_server() -> bool:
+    """Whether the server is on this machine (or, from a container, its
+    host). Recorded answers are allowed only there: every other server,
+    Verdifax's hosted one or its hardware-attested one, is live, and a
+    review against it asks the model."""
+    from urllib.parse import urlsplit
+    return (urlsplit(base_url()).hostname or "") in LOCAL_HOSTS
 
 
 def write_private(path: Path, text: str) -> None:
@@ -318,8 +343,8 @@ class Answers:
     def __init__(self, path: Optional[str]) -> None:
         self.recorded = None
         if path:
-            if is_production():
-                fail("--answers is for tests against a local server, never production")
+            if not is_local_server():
+                fail("--answers is for tests against a local server, never a live one")
             self.recorded = json.loads(Path(path).read_text(encoding="utf-8"))
 
     def ask(self, prompt: str, user_text: str, rule_id: str, model: str) -> dict[str, Any]:
@@ -407,6 +432,7 @@ def measured_cost(model: str, input_tokens: int, output_tokens: int) -> Optional
 # ── review ─────────────────────────────────────────────────────────────────
 
 def cmd_review(args: argparse.Namespace) -> None:
+    registry_record = registry_record_hash(os.environ.get(REGISTRY_RECORD_ENV))
     keys = load_keys()
     agent = client_for(keys["agent"])
     rules, rule_set_hash = load_rules()
@@ -439,7 +465,7 @@ def cmd_review(args: argparse.Namespace) -> None:
         # refuses the draft here, before any model is called.
         agent_named = None if args.without_actor else verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID)
         intake = job.step("intake", after=[], payload=canonical(intake_payload), program_id=PROGRAM_ID, route_id=ROUTE_INTAKE,
-                          registry_record_hash=REGISTRY_RECORD_HASH, attested_context=agent_named,
+                          registry_record_hash=registry_record, attested_context=agent_named,
                           policy_context=context("intake"))
     except APIError as exc:
         # The account policy refused the draft at intake (for example a
@@ -476,7 +502,7 @@ def cmd_review(args: argparse.Namespace) -> None:
                       "claims": listed["claims"]}
     try:
         claims_step = job.step("claims", after=["intake"], payload=canonical(claims_payload), program_id=PROGRAM_ID,
-                               route_id=ROUTE_CLAIMS, registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer_texts["claims"],
+                               route_id=ROUTE_CLAIMS, registry_record_hash=registry_record, ai_output_text=answer_texts["claims"],
                                request_substance=usage_substance(listed),
                                attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
                                                                          model_name=listed["model"], prompt_hash=claims_prompt_hash,
@@ -509,7 +535,7 @@ def cmd_review(args: argparse.Namespace) -> None:
                    "prompt_hash": prompt_hash, "verdict": answer["verdict"], "reason": answer["reason"]}
         try:
             receipt = job.step(rule["id"], after=["claims"], payload=canonical(payload), program_id=PROGRAM_ID, route_id=ROUTE_RULE,
-                               registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer_texts[rule["id"]],
+                               registry_record_hash=registry_record, ai_output_text=answer_texts[rule["id"]],
                                request_substance=usage_substance(answer),
                                attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
                                                                          model_name=answer["model"], prompt_hash=prompt_hash,
@@ -552,7 +578,7 @@ def cmd_review(args: argparse.Namespace) -> None:
                        "explanation": explained["explanation"]}
     try:
         final = job.step("verdict", after=[r["id"] for r in rules], final=True, payload=canonical(verdict_payload), program_id=PROGRAM_ID,
-                         route_id=ROUTE_VERDICT, registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer_texts["verdict"],
+                         route_id=ROUTE_VERDICT, registry_record_hash=registry_record, ai_output_text=answer_texts["verdict"],
                          request_substance=usage_substance(explained),
                          attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
                                                                    model_name=explained["model"], prompt_hash=verdict_prompt_hash,

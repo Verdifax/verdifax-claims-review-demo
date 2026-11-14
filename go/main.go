@@ -31,7 +31,9 @@
 //	claims-review feed
 //	claims-review verify-commands JOB_ID
 //
-// Environment: VERDIFAX_BASE_URL (default https://api.verdifax.com).
+// Environment: VERDIFAX_BASE_URL (default https://api.verdifax.com);
+// CLAIMS_REVIEW_REGISTRY_RECORD_HASH, the registry record each step claims on a
+// server that enforces a program registry (default: the program's fixed value).
 // Files, in the working folder: demo-keys.json and approver-key.json (0600),
 // approver.txt, account-history.json, records/<job_id>/*.json with payloads/,
 // signals.json; approver-<name>-key.json (0600), approver-<name>.txt and
@@ -48,6 +50,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -142,6 +145,7 @@ var (
 	programID          = sha256Hex([]byte("verdifax-claims-review-demo/program/v1"))
 	registryRecordHash = sha256Hex([]byte("verdifax-claims-review-demo/registry/v1"))
 	classificationLine = regexp.MustCompile(`^<!--\s*classification:\s*([A-Z_]+)\s*-->$`)
+	hex64              = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 func sha256Hex(data []byte) string {
@@ -191,7 +195,21 @@ func baseURL() string {
 	return defaultBaseURL
 }
 
-func isProduction() bool { return baseURL() == defaultBaseURL }
+// isLocalServer says whether the server is on this machine (or, from a
+// container, its host). Recorded answers are allowed only there: every
+// other server, Verdifax's hosted one or its hardware-attested one, is
+// live, and a review against it asks the model.
+func isLocalServer() bool {
+	server, parseErr := url.Parse(baseURL())
+	if parseErr != nil {
+		return false
+	}
+	switch server.Hostname() {
+	case "127.0.0.1", "localhost", "::1", "host.docker.internal":
+		return true
+	}
+	return false
+}
 
 // failOut and exit are where fail writes and how it stops; the tests
 // replace them to read the message the program would print.
@@ -594,8 +612,8 @@ func loadAnswers(path string) map[string]recordedAnswer {
 	if path == "" {
 		return nil
 	}
-	if isProduction() {
-		fail("--answers is for tests against a local server, never production")
+	if !isLocalServer() {
+		fail("--answers is for tests against a local server, never a live one")
 	}
 	var recorded map[string]recordedAnswer
 	must(json.Unmarshal(readFile(path), &recorded))
@@ -677,7 +695,27 @@ func policyContext(objectID, level string, quality *verdifax.DataQuality) *verdi
 	return &verdifax.PolicyContext{ObjectType: "text", ObjectID: objectPrefix + objectID, Classification: level, DataQuality: quality}
 }
 
+// registryRecord is the program registry record every step claims. A server
+// that enforces a program registry, as Verdifax's hardware-attested endpoint
+// does, admits a step only when it claims the record its operator registered
+// for this program: CLAIMS_REVIEW_REGISTRY_RECORD_HASH names that record.
+// Unset, the program claims its fixed value, which a server with no enforced
+// registry seals as declared. It returns the error to report, or "".
+func registryRecord(given string) (string, string) {
+	if given == "" {
+		return registryRecordHash, ""
+	}
+	if !hex64.MatchString(given) {
+		return "", "CLAIMS_REVIEW_REGISTRY_RECORD_HASH must be 64 lowercase hex characters"
+	}
+	return given, ""
+}
+
 func cmdReview(ctx context.Context, draftPath, model, answersPath string, withoutActor bool) {
+	registryRecordClaimed, registryErr := registryRecord(os.Getenv("CLAIMS_REVIEW_REGISTRY_RECORD_HASH"))
+	if registryErr != "" {
+		fail(registryErr)
+	}
 	keys := loadKeys()
 	agent := clientFor(keys.Agent.Secret, keys.Agent.SigningKey)
 	rules, ruleSetHash := loadRules()
@@ -709,7 +747,7 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string, withou
 		agentNamed = map[string]any{"attested": true, "actor_id": actorID}
 	}
 	intake, intakeErr := job.Step(ctx, "intake", &verdifax.AttestRequest{PayloadText: canonical(intakePayload), ProgramID: programID,
-		RouteID: routeIntake, RegistryRecordHash: registryRecordHash, AttestedContext: agentNamed,
+		RouteID: routeIntake, RegistryRecordHash: registryRecordClaimed, AttestedContext: agentNamed,
 		PolicyContext: policyContext("intake", level, quality())}, verdifax.WithAfter())
 	var apiErr *verdifax.APIError
 	if errors.As(intakeErr, &apiErr) {
@@ -748,7 +786,7 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string, withou
 	claimsPayload := map[string]any{"form": form, "step": "claims", "draft_sha256": draftHash, "rule_set_hash": ruleSetHash,
 		"model": listed.Model, "model_response_id": listed.ResponseID, "prompt_hash": claimsPromptHash, "claims": claims}
 	claimsStep, claimsErr := job.Step(ctx, "claims", &verdifax.AttestRequest{PayloadText: canonical(claimsPayload), ProgramID: programID,
-		RouteID: routeClaims, RegistryRecordHash: registryRecordHash, AIOutputText: listed.Raw,
+		RouteID: routeClaims, RegistryRecordHash: registryRecordClaimed, AIOutputText: listed.Raw,
 		RequestSubstance: usageSubstance(&usageReport{InputTokens: listed.InputTokens, OutputTokens: listed.OutputTokens}),
 		AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "model_provider": "anthropic", "model_name": listed.Model,
 			"prompt_hash": claimsPromptHash, "decision_kind": "claims.list", "decision_result": fmt.Sprint(len(claims))},
@@ -788,7 +826,7 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string, withou
 		}
 		answerTexts[r.ID] = aiText
 		receipt, stepErr := job.Step(ctx, r.ID, &verdifax.AttestRequest{PayloadText: canonical(payload), ProgramID: programID,
-			RouteID: routeRule, RegistryRecordHash: registryRecordHash, AIOutputText: aiText,
+			RouteID: routeRule, RegistryRecordHash: registryRecordClaimed, AIOutputText: aiText,
 			RequestSubstance: usageSubstance(&usageReport{InputTokens: a.InputTokens, OutputTokens: a.OutputTokens}),
 			AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "model_provider": "anthropic", "model_name": a.Model,
 				"prompt_hash": promptHash, "decision_kind": "claims.rule_check", "decision_result": a.Verdict},
@@ -843,7 +881,7 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string, withou
 		"verdict": verdict, "failed_rules": failed, "results": results, "model": explained.Model,
 		"model_response_id": explained.ResponseID, "prompt_hash": verdictPromptHash, "explanation": explanation}
 	final, finalErr := job.Step(ctx, "verdict", &verdifax.AttestRequest{PayloadText: canonical(verdictPayload), ProgramID: programID,
-		RouteID: routeVerdict, RegistryRecordHash: registryRecordHash, AIOutputText: explained.Raw,
+		RouteID: routeVerdict, RegistryRecordHash: registryRecordClaimed, AIOutputText: explained.Raw,
 		RequestSubstance: usageSubstance(&usageReport{InputTokens: explained.InputTokens, OutputTokens: explained.OutputTokens}),
 		AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "model_provider": "anthropic", "model_name": explained.Model,
 			"prompt_hash": verdictPromptHash, "decision_kind": "claims.verdict", "decision_result": verdict},

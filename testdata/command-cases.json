@@ -197,5 +197,34 @@
       "  verdifax-verify --account-policy POLICY --signoff records/job-1/signoffs.json --signoff-history records/job-1/signoff-history.json --signoff-head-max-age 168h --approver-key approver.txt records/job-1/steps/verdict.json",
       "  verdifax-verify --signoff records/job-1/signoffs.json --signoff-history records/job-1/signoff-history.json --signoff-head-max-age 168h --approver-key approver.txt records/job-1/steps/verdict.json"
     ]
+  },
+  "registry_record": {
+    "note": "The registry record a review claims: the fixed value when CLAIMS_REVIEW_REGISTRY_RECORD_HASH is unset or empty, the given record when it is 64 lowercase hex characters, and a refusal otherwise.",
+    "default_source": "verdifax-claims-review-demo/registry/v1",
+    "given": "abababababababababababababababababababababababababababababababab",
+    "invalid": [
+      "xyz",
+      "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+      "ababababababababababababababababababababababababababababababab",
+      "ababababababababababababababababababababababababababababababababab"
+    ],
+    "error": "CLAIMS_REVIEW_REGISTRY_RECORD_HASH must be 64 lowercase hex characters"
+  },
+  "local_server": {
+    "note": "Recorded answers (--answers) are allowed only against a server on this machine or, from a container, its host; every other server is live and a review against it asks the model.",
+    "local": [
+      "http://127.0.0.1:8080",
+      "http://localhost:9090/",
+      "http://[::1]:1",
+      "http://host.docker.internal:50001"
+    ],
+    "live": [
+      "https://api.verdifax.com",
+      "https://attested.verdifax.com",
+      "http://127.0.0.1.example.com",
+      "https://localhost.example.com:443",
+      "https://verdifax.com/127.0.0.1"
+    ],
+    "error": "--answers is for tests against a local server, never a live one"
   }
 }

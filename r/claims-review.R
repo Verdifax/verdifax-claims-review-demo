@@ -32,7 +32,9 @@
 #   claims-review feed
 #   claims-review verify-commands JOB_ID
 #
-# Environment: VERDIFAX_BASE_URL (default https://api.verdifax.com).
+# Environment: VERDIFAX_BASE_URL (default https://api.verdifax.com);
+# CLAIMS_REVIEW_REGISTRY_RECORD_HASH, the registry record each step claims on a
+# server that enforces a program registry (default: the program's fixed value).
 # Files, in the working folder: demo-keys.json and approver-key.json (0600),
 # approver.txt, account-history.json, records/<job_id>/*.json with payloads/,
 # signals.json; approver-<name>-key.json (0600), approver-<name>.txt and
@@ -129,8 +131,28 @@ as_list <- function(x) lapply(x, identity)  # a character vector that stays a JS
 PROGRAM_ID <- sha256_hex("verdifax-claims-review-demo/program/v1")
 REGISTRY_RECORD_HASH <- sha256_hex("verdifax-claims-review-demo/registry/v1")
 
+# The program registry record every step claims. A server that enforces a
+# program registry, as Verdifax's hardware-attested endpoint does, admits a
+# step only when it claims the record its operator registered for this
+# program: CLAIMS_REVIEW_REGISTRY_RECORD_HASH names that record. Unset, the
+# program claims its fixed value, which a server with no enforced registry
+# seals as declared. It returns the error to report in $error, or the hash.
+registry_record_hash <- function(given) {
+  if (is.null(given) || identical(given, "")) return(list(hash = REGISTRY_RECORD_HASH, error = NULL))
+  if (!grepl("^[0-9a-f]{64}$", given)) return(list(hash = NULL, error = "CLAIMS_REVIEW_REGISTRY_RECORD_HASH must be 64 lowercase hex characters"))
+  list(hash = given, error = NULL)
+}
+
 base_url <- function() sub("/+$", "", Sys.getenv("VERDIFAX_BASE_URL", DEFAULT_BASE_URL))
-is_production <- function() base_url() == DEFAULT_BASE_URL
+# Whether the server is on this machine (or, from a container, its host).
+# Recorded answers are allowed only there: every other server, Verdifax's
+# hosted one or its hardware-attested one, is live, and a review against it
+# asks the model.
+LOCAL_HOSTS <- c("127.0.0.1", "localhost", "::1", "host.docker.internal")
+is_local_server <- function() {
+  host <- sub("^(?:[a-z]+://)?(\\[[^]]*\\]|[^/:?#]+).*$", "\\1", base_url(), perl = TRUE)
+  gsub("^\\[|\\]$", "", host) %in% LOCAL_HOSTS
+}
 
 fail <- function(message) {
   cat("claims-review:", message, "\n", file = stderr())
@@ -287,7 +309,7 @@ cmd_setup <- function() {
 # Recorded answers for tests, refused against production.
 load_answers <- function(path) {
   if (is.null(path)) return(NULL)
-  if (is_production()) fail("--answers is for tests against a local server, never production")
+  if (!is_local_server()) fail("--answers is for tests against a local server, never a live one")
   jsonlite::fromJSON(path, simplifyVector = FALSE)
 }
 
@@ -426,6 +448,9 @@ policy_context <- function(object_id, level, quality) {
 }
 
 cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
+  claimed <- registry_record_hash(Sys.getenv("CLAIMS_REVIEW_REGISTRY_RECORD_HASH", ""))
+  if (!is.null(claimed$error)) fail(claimed$error)
+  registry_record <- claimed$hash
   keys <- load_keys()
   agent <- client_for(keys$agent)
   loaded <- load_rules()
@@ -450,7 +475,7 @@ cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
   job <- verdifax_job(agent, job_id)
   intake <- tryCatch(
     verdifax_job_step(job, "intake", after = list(), payload = canonical(intake_payload), program_id = PROGRAM_ID,
-                      route_id = ROUTE_INTAKE, registry_record_hash = REGISTRY_RECORD_HASH,
+                      route_id = ROUTE_INTAKE, registry_record_hash = registry_record,
                       # The gate step names its agent, as policy v4 requires of
                       # every step; --without-actor leaves the name out on
                       # purpose, so the policy refuses the draft here, before
@@ -494,7 +519,7 @@ cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
                          claims = as_list(listed$claims))
   claims_step <- tryCatch(
     verdifax_job_step(job, "claims", after = list("intake"), payload = canonical(claims_payload), program_id = PROGRAM_ID,
-                      route_id = ROUTE_CLAIMS, registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = listed$raw,
+                      route_id = ROUTE_CLAIMS, registry_record_hash = registry_record, ai_output_text = listed$raw,
                       request_substance = usage_substance(list(input_tokens = listed$input_tokens, output_tokens = listed$output_tokens)),
                       attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
                                               model_name = listed$model, prompt_hash = claims_prompt_hash,
@@ -527,7 +552,7 @@ cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
     answer_texts[[rule$id]] <- ai_text
     receipt <- tryCatch(
       verdifax_job_step(job, rule$id, after = list("claims"), payload = canonical(payload), program_id = PROGRAM_ID,
-                        route_id = ROUTE_RULE, registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = ai_text,
+                        route_id = ROUTE_RULE, registry_record_hash = registry_record, ai_output_text = ai_text,
                         request_substance = usage_substance(list(input_tokens = answer$input_tokens, output_tokens = answer$output_tokens)),
                         attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
                                                 model_name = answer$model, prompt_hash = prompt_hash,
@@ -572,7 +597,7 @@ cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
   final <- tryCatch(
     verdifax_job_step(job, "verdict", after = as_list(vapply(rules, function(r) r$id, character(1))), final = TRUE,
                       payload = canonical(verdict_payload), program_id = PROGRAM_ID, route_id = ROUTE_VERDICT,
-                      registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = explained$raw,
+                      registry_record_hash = registry_record, ai_output_text = explained$raw,
                       request_substance = usage_substance(list(input_tokens = explained$input_tokens, output_tokens = explained$output_tokens)),
                       attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
                                               model_name = explained$model, prompt_hash = verdict_prompt_hash,

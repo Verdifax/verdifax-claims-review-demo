@@ -611,6 +611,33 @@ type commandCases struct {
 	} `json:"request_key"`
 }
 
+func TestTheRegistryRecordAReviewClaims(t *testing.T) {
+	var c struct {
+		RegistryRecord struct {
+			DefaultSource string   `json:"default_source"`
+			Given         string   `json:"given"`
+			Invalid       []string `json:"invalid"`
+			Error         string   `json:"error"`
+		} `json:"registry_record"`
+	}
+	readCases(t, "command-cases.json", &c)
+	r := c.RegistryRecord
+	if registryRecordHash != sha256Hex([]byte(r.DefaultSource)) {
+		t.Fatalf("the fixed record is %s", registryRecordHash)
+	}
+	if got, msg := registryRecord(""); got != registryRecordHash || msg != "" {
+		t.Errorf("unset: %q %q", got, msg)
+	}
+	if got, msg := registryRecord(r.Given); got != r.Given || msg != "" {
+		t.Errorf("given: %q %q", got, msg)
+	}
+	for _, bad := range r.Invalid {
+		if got, msg := registryRecord(bad); got != "" || msg != r.Error {
+			t.Errorf("%q: %q %q, want the refusal %q", bad, got, msg, r.Error)
+		}
+	}
+}
+
 func TestTheRound62CommandsDecideAlike(t *testing.T) {
 	var c commandCases
 	readCases(t, "command-cases.json", &c)
@@ -816,5 +843,37 @@ func TestTheAccountPolicyCheckPassesTheSignOffsOnceGiven(t *testing.T) {
 	}
 	if got := printed(); got != want(c.VerifyCommands.WithSignoffs) {
 		t.Fatalf("with sign-offs:\n%s", got)
+	}
+}
+
+// Recorded answers are allowed only against a server on this machine or,
+// from a container, its host; every other server is live.
+func TestRecordedAnswersOnlyAgainstALocalServer(t *testing.T) {
+	var c struct {
+		LocalServer struct {
+			Local []string `json:"local"`
+			Live  []string `json:"live"`
+			Error string   `json:"error"`
+		} `json:"local_server"`
+	}
+	readCases(t, "command-cases.json", &c)
+	for _, u := range c.LocalServer.Local {
+		t.Setenv("VERDIFAX_BASE_URL", u)
+		if !isLocalServer() {
+			t.Errorf("%s is local", u)
+		}
+	}
+	for _, u := range c.LocalServer.Live {
+		t.Setenv("VERDIFAX_BASE_URL", u)
+		if isLocalServer() {
+			t.Errorf("%s is live", u)
+		}
+	}
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "fail(\""+c.LocalServer.Error+"\")") {
+		t.Errorf("a live server must end the program with %q", c.LocalServer.Error)
 	}
 }

@@ -10,7 +10,7 @@ import {
   canonical, DELETED_STEP_SUFFIX, deletedSteps, draftClassification, FEED_AGE_REASON, HISTORY_AGE_REASON, loadRules, MIN_VERIFIER, printVerifyCommands,
   MODEL_RETRY_TRIES, readInput, RULE_SET, SAVED_HEAD_MAX_AGE, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
   approverFiles, approverNameError, clientFor, DATA_QUALITY_CHECKS, DATA_QUALITY_SOURCE, dataQuality, POLICY_FILE, REPO, replaceWithTombstone, RULE_SET_SHA256,
-  settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON, recordedUsage, withSigningKey, keyFor,
+  settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON, recordedUsage, withSigningKey, keyFor, registryRecordHash, REGISTRY_RECORD_HASH, isLocalServer, sha256Hex,
 } from "../claims-review.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -234,6 +234,29 @@ test("approver names and files", () => {
   for (const name of COMMANDS.approver_names.invalid) assert.equal(approverNameError(name), COMMANDS.approver_names.error, name);
   const f = COMMANDS.approver_names.files;
   assert.deepEqual(approverFiles(f.name), [f.private_key, f.public_key]);
+});
+
+test("the registry record a review claims", () => {
+  const c = COMMANDS.registry_record;
+  assert.equal(REGISTRY_RECORD_HASH, sha256Hex(c.default_source));
+  assert.equal(registryRecordHash(undefined), REGISTRY_RECORD_HASH);
+  assert.equal(registryRecordHash(""), REGISTRY_RECORD_HASH);
+  assert.equal(registryRecordHash(c.given), c.given);
+  // A malformed value ends the program with this message (fail exits the process).
+  assert.ok(readFileSync(join(HERE, "..", "claims-review.mjs"), "utf8").includes(`fail("${c.error}")`));
+});
+
+test("recorded answers only against a local server", () => {
+  const c = COMMANDS.local_server;
+  const saved = process.env.VERDIFAX_BASE_URL;
+  try {
+    for (const url of c.local) { process.env.VERDIFAX_BASE_URL = url; assert.ok(isLocalServer(), url); }
+    for (const url of c.live) { process.env.VERDIFAX_BASE_URL = url; assert.ok(!isLocalServer(), url); }
+  } finally {
+    if (saved === undefined) delete process.env.VERDIFAX_BASE_URL; else process.env.VERDIFAX_BASE_URL = saved;
+  }
+  // A live server ends the program with this message (fail exits the process).
+  assert.ok(readFileSync(join(HERE, "..", "claims-review.mjs"), "utf8").includes(`fail("${c.error}")`));
 });
 
 test("the agent's request key in the keys file", () => {

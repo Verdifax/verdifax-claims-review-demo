@@ -24,8 +24,9 @@
 //   claims-review unpublish JOB_ID | unpublish --receipt RUN_ID
 //   claims-review approver-add NAME | approver-revoke NAME
 //   claims-review settings owner-replacement|verdifax-deletion allowed|blocked
-//   claims-review request-key-rotate | request-key-clear      the agent key's request key
-//   claims-review key-revoke                                  the owner revokes the agent key
+//   claims-review request-key-register KEY_FILE               the key Verdifax made for the chapter
+//   claims-review request-key-rotate | request-key-clear [--holder]   the agent key's request key, or the holder's
+//   claims-review key-revoke [--holder]                       the owner revokes the agent key, or the holder
 //   claims-review delete-step JOB_ID STEP                     the owner deletes one step
 //   claims-review webhook-subscribe URL | webhook-list | webhook-remove
 //   claims-review feed
@@ -218,13 +219,32 @@ const approverNameError = (name) => (APPROVER_NAME.test(name) ? null : "an appro
 // A named approver's private key file (0600) and public key file.
 const approverFiles = (name) => [`approver-${name}-key.json`, `approver-${name}.txt`];
 
+// A key that was ever on the trial tier must keep a request key, and the
+// demo's accounts are trial accounts, so the agent key can replace its request
+// key but never clear it. For the request-key chapter Verdifax makes one
+// production-tier member key in the account, its creation sealed in the feed
+// as Verdifax's: the holder. request-key-register keeps it in demo-keys.json,
+// and --holder makes the request-key commands and key-revoke act on it.
+
+// The keys file with one key's request key replaced, or removed when it was
+// cleared; role is "agent" or "holder".
+function withSigningKey(keys, role, signingKeyHex) {
+  const entry = { ...keys[role] };
+  delete entry.signing_key;
+  if (signingKeyHex !== null) entry.signing_key = signingKeyHex;
+  return { ...keys, [role]: entry };
+}
+
 // The keys file with the agent key's request key replaced, or removed when it
 // was cleared.
-function withAgentSigningKey(keys, signingKeyHex) {
-  const agent = { ...keys.agent };
-  delete agent.signing_key;
-  if (signingKeyHex !== null) agent.signing_key = signingKeyHex;
-  return { ...keys, agent };
+const withAgentSigningKey = (keys, signingKeyHex) => withSigningKey(keys, "agent", signingKeyHex);
+
+// The key a request-key command or key-revoke acts on: the agent, or with
+// --holder the key Verdifax made for the request-key chapter.
+function keyFor(keys, holder) {
+  const role = holder ? "holder" : "agent";
+  if (!keys[role]) fail("demo-keys.json holds no request-key holder; run request-key-register with the key Verdifax made first");
+  return [role, keys[role]];
 }
 
 // ── setup ──────────────────────────────────────────────────────────────────
@@ -275,6 +295,14 @@ function loadAnswers(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
+// recordedUsage is the model use a recorded answer declares, 0 when it names
+// none. Only tests against a local server read recorded answers; the budget
+// stops are rehearsed with answers that declare large use. Never part of the
+// answer.
+function recordedUsage(a) {
+  return { inputTokens: Number(a.input_tokens || 0), outputTokens: Number(a.output_tokens || 0) };
+}
+
 async function ask(recorded, prompt, userText, ruleId, model) {
   if (recorded) {
     const a = recorded[ruleId];
@@ -284,8 +312,7 @@ async function ask(recorded, prompt, userText, ruleId, model) {
       verdict: a.verdict,
       reason: a.reason,
       raw: canonical({ verdict: a.verdict, reason: a.reason }),
-      inputTokens: 0,
-      outputTokens: 0,
+      ...recordedUsage(a),
     };
   }
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
@@ -317,8 +344,8 @@ async function ask(recorded, prompt, userText, ruleId, model) {
 async function askStructured(recorded, recordedKey, prompt, userText, model, maxTokens, makeShape, declined, empty) {
   if (recorded) {
     const a = recorded[recordedKey];
-    const { model: m, response_id: r, ...fields } = a;
-    return { model: m || "recorded-answers", responseId: r || "recorded", fields, raw: canonical(fields), inputTokens: 0, outputTokens: 0 };
+    const { model: m, response_id: r, input_tokens: _in, output_tokens: _out, ...fields } = a;
+    return { model: m || "recorded-answers", responseId: r || "recorded", fields, raw: canonical(fields), ...recordedUsage(a) };
   }
   const { default: Anthropic } = await import("@anthropic-ai/sdk");
   const { zodOutputFormat } = await import("@anthropic-ai/sdk/helpers/zod");
@@ -795,27 +822,42 @@ async function cmdSettings(setting, value) {
   console.log(`${setting} is ${value}`);
 }
 
-async function cmdRequestKeyRotate() {
+async function cmdRequestKeyRegister(keyFile) {
   const keys = loadKeys();
+  if (keys.holder) fail("demo-keys.json already holds the request-key holder");
+  const made = JSON.parse(readFileSync(keyFile, "utf8"));
+  const signer = generateRequestKeyPair();
+  const holder = new VerdifaxClient({ baseURL: baseURL(), apiKey: made.secret, signingKey: signer.privateKey });
+  await holder.registerRequestKey();
+  const entry = { id: made.id, secret: made.secret, signing_key: signer.privateKey.toString("hex") };
+  writePrivate("demo-keys.json", JSON.stringify({ ...keys, holder: entry }, null, 2) + "\n");
+  console.log(`a request key was registered on key ${made.id}, the key Verdifax made for the request-key chapter`);
+}
+
+async function cmdRequestKeyRotate(holder) {
+  const keys = loadKeys();
+  const [role, key] = keyFor(keys, holder);
   const next = generateRequestKeyPair();
-  await clientFor(keys.agent).rotateRequestKey(next.privateKey);
-  writePrivate("demo-keys.json", JSON.stringify(withAgentSigningKey(keys, next.privateKey.toString("hex")), null, 2) + "\n");
-  console.log("the agent key's request key was replaced, approved by the key it replaced");
+  await clientFor(key).rotateRequestKey(next.privateKey);
+  writePrivate("demo-keys.json", JSON.stringify(withSigningKey(keys, role, next.privateKey.toString("hex")), null, 2) + "\n");
+  console.log(`the ${role} key's request key was replaced, approved by the key it replaced`);
 }
 
-async function cmdRequestKeyClear() {
+async function cmdRequestKeyClear(holder) {
   const keys = loadKeys();
-  await clientFor(keys.agent).clearRequestKey();
-  writePrivate("demo-keys.json", JSON.stringify(withAgentSigningKey(keys, null), null, 2) + "\n");
-  console.log("the agent key's request key was cleared, approved by that key");
+  const [role, key] = keyFor(keys, holder);
+  await clientFor(key).clearRequestKey();
+  writePrivate("demo-keys.json", JSON.stringify(withSigningKey(keys, role, null), null, 2) + "\n");
+  console.log(`the ${role} key's request key was cleared, approved by that key`);
 }
 
-async function cmdKeyRevoke() {
+async function cmdKeyRevoke(holder) {
   const keys = loadKeys();
+  const [role, key] = keyFor(keys, holder);
   const owner = clientFor(keys.owner);
-  await owner.revokeAccountKey(Number(keys.agent.id));
+  await owner.revokeAccountKey(Number(key.id));
   writeJSON("account-keys.json", await owner.listAccountKeys());
-  console.log(`agent key ${keys.agent.id} revoked; the records it sealed stay as they were`);
+  console.log(`${role} key ${key.id} revoked; the records it sealed stay as they were`);
 }
 
 // A deleted step's record is replaced by its tombstone, which verdifax-verify
@@ -1015,12 +1057,18 @@ async function main() {
     case "settings":
       if (args.length !== 2) fail("settings takes a SETTING and a VALUE");
       return cmdSettings(args[0], args[1]);
+    case "request-key-register":
+      if (args.length !== 1) fail("request-key-register takes the KEY_FILE of the key Verdifax made");
+      return cmdRequestKeyRegister(args[0]);
     case "request-key-rotate":
-      return cmdRequestKeyRotate();
     case "request-key-clear":
-      return cmdRequestKeyClear();
-    case "key-revoke":
-      return cmdKeyRevoke();
+    case "key-revoke": {
+      const holder = args.includes("--holder");
+      if (holder) args.splice(args.indexOf("--holder"), 1);
+      if (args.length !== 0) fail(`${command} takes only --holder`);
+      if (command === "request-key-rotate") return cmdRequestKeyRotate(holder);
+      return command === "request-key-clear" ? cmdRequestKeyClear(holder) : cmdKeyRevoke(holder);
+    }
     case "delete-step":
       if (args.length !== 2) fail("delete-step takes a JOB_ID and a STEP");
       return cmdDeleteStep(args[0], args[1]);
@@ -1037,7 +1085,7 @@ async function main() {
       if (args.length !== 1) fail("verify-commands takes a JOB_ID");
       return printVerifyCommands(args[0]);
     default:
-      fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-rotate, request-key-clear, key-revoke, delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID");
+      fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-register KEY_FILE, request-key-rotate [--holder], request-key-clear [--holder], key-revoke [--holder], delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID");
   }
 }
 
@@ -1045,7 +1093,7 @@ export {
   canonical, DELETED_STEP_SUFFIX, deletedSteps, draftClassification, FEED_AGE_REASON, HISTORY_AGE_REASON, loadRules, MIN_VERIFIER, printVerifyCommands,
   MODEL_RETRY_TRIES, readInput, RULE_SET, SAVED_HEAD_MAX_AGE, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
   approverFiles, approverNameError, clientFor, DATA_QUALITY_CHECKS, DATA_QUALITY_SOURCE, dataQuality, POLICY_FILE, REPO, replaceWithTombstone, RULE_SET_SHA256,
-  settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON,
+  settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON, recordedUsage, withSigningKey, keyFor,
 };
 
 // Node loads the program by its real path, so the path it was started with is

@@ -23,8 +23,9 @@
 //	claims-review unpublish JOB_ID | unpublish --receipt RUN_ID
 //	claims-review approver-add NAME | approver-revoke NAME
 //	claims-review settings owner-replacement|verdifax-deletion allowed|blocked
-//	claims-review request-key-rotate | request-key-clear      the agent key's request key
-//	claims-review key-revoke                                  the owner revokes the agent key
+//	claims-review request-key-register KEY_FILE               the key Verdifax made for the chapter
+//	claims-review request-key-rotate | request-key-clear [--holder]   the agent key's request key, or the holder's
+//	claims-review key-revoke [--holder]                       the owner revokes the agent key, or the holder
 //	claims-review delete-step JOB_ID STEP                     the owner deletes one step
 //	claims-review webhook-subscribe URL | webhook-list | webhook-remove
 //	claims-review feed
@@ -277,6 +278,13 @@ type keyFile struct {
 		ID     int64  `json:"id"`
 		Secret string `json:"secret"`
 	} `json:"feed"`
+	// Holder is the key Verdifax made at production tier for the
+	// request-key chapter, once request-key-register has kept it.
+	Holder *struct {
+		ID         int64  `json:"id"`
+		Secret     string `json:"secret"`
+		SigningKey string `json:"signing_key"`
+	} `json:"holder,omitempty"`
 	PolicyDocumentHash string `json:"policy_document_hash"`
 }
 
@@ -367,26 +375,52 @@ func approverFiles(name string) (string, string) {
 	return "approver-" + name + "-key.json", "approver-" + name + ".txt"
 }
 
-// withAgentSigningKey is the keys file, read as JSON, with the agent key's
-// request key replaced, or removed when it was cleared (nil).
-func withAgentSigningKey(keys map[string]any, signingKeyHex *string) map[string]any {
+// A key that was ever on the trial tier must keep a request key, and the
+// demo's accounts are trial accounts, so the agent key can replace its request
+// key but never clear it. For the request-key chapter Verdifax makes one
+// production-tier member key in the account, its creation sealed in the feed
+// as Verdifax's: the holder. request-key-register keeps it in demo-keys.json,
+// and --holder makes the request-key commands and key-revoke act on it.
+
+// withSigningKey is the keys file, read as JSON, with one key's request key
+// replaced, or removed when it was cleared (nil); role is "agent" or "holder".
+func withSigningKey(keys map[string]any, role string, signingKeyHex *string) map[string]any {
 	out := map[string]any{}
 	for k, v := range keys {
 		out[k] = v
 	}
-	agent := map[string]any{}
-	if current, isMap := keys["agent"].(map[string]any); isMap {
+	entry := map[string]any{}
+	if current, isMap := keys[role].(map[string]any); isMap {
 		for k, v := range current {
 			if k != "signing_key" {
-				agent[k] = v
+				entry[k] = v
 			}
 		}
 	}
 	if signingKeyHex != nil {
-		agent["signing_key"] = *signingKeyHex
+		entry["signing_key"] = *signingKeyHex
 	}
-	out["agent"] = agent
+	out[role] = entry
 	return out
+}
+
+// withAgentSigningKey is the keys file, read as JSON, with the agent key's
+// request key replaced, or removed when it was cleared (nil).
+func withAgentSigningKey(keys map[string]any, signingKeyHex *string) map[string]any {
+	return withSigningKey(keys, "agent", signingKeyHex)
+}
+
+// keyFor is the key a request-key command or key-revoke acts on: the agent,
+// or with --holder the key Verdifax made for the request-key chapter. It
+// returns the role, the key's id, its secret and its request key.
+func keyFor(keys keyFile, holder bool) (string, int64, string, string) {
+	if !holder {
+		return "agent", keys.Agent.ID, keys.Agent.Secret, keys.Agent.SigningKey
+	}
+	if keys.Holder == nil {
+		fail("demo-keys.json holds no request-key holder; run request-key-register with the key Verdifax made first")
+	}
+	return "holder", keys.Holder.ID, keys.Holder.Secret, keys.Holder.SigningKey
 }
 
 // ── setup ──────────────────────────────────────────────────────────────────
@@ -457,6 +491,12 @@ type recordedAnswer struct {
 	// verdict steps.
 	Claims      []string `json:"claims"`
 	Explanation string   `json:"explanation"`
+	// InputTokens and OutputTokens are the model use a recorded answer
+	// declares, 0 when it names none: the budget stops are rehearsed against
+	// a local server with answers that declare large use. Never part of the
+	// answer.
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
 }
 
 // structured is one structured answer from the model: its exact text, which
@@ -472,7 +512,8 @@ type structured struct {
 func askStructured(ctx context.Context, recorded *recordedAnswer, recordedRaw, prompt, userText, model string, maxTokens int64,
 	schema map[string]any, declined string) (structured, bool) {
 	if recorded != nil {
-		out := structured{Model: recorded.Model, ResponseID: recorded.ResponseID, Raw: recordedRaw}
+		out := structured{Model: recorded.Model, ResponseID: recorded.ResponseID, Raw: recordedRaw,
+			InputTokens: recorded.InputTokens, OutputTokens: recorded.OutputTokens}
 		if out.Model == "" {
 			out.Model = "recorded-answers"
 		}
@@ -571,7 +612,8 @@ func ask(ctx context.Context, recorded map[string]recordedAnswer, prompt, userTe
 			a.ResponseID = "recorded"
 		}
 		return answer{Model: a.Model, ResponseID: a.ResponseID, Verdict: a.Verdict, Reason: a.Reason,
-			Raw: canonical(map[string]string{"verdict": a.Verdict, "reason": a.Reason})}
+			Raw:         canonical(map[string]string{"verdict": a.Verdict, "reason": a.Reason}),
+			InputTokens: a.InputTokens, OutputTokens: a.OutputTokens}
 	}
 	client := anthropic.NewClient(option.WithMaxRetries(modelRetryTries - 1))
 	schema := map[string]any{
@@ -1417,32 +1459,55 @@ func writeKeysJSON(keys map[string]any) {
 	writePrivate("demo-keys.json", string(encoded)+"\n")
 }
 
-func cmdRequestKeyRotate(ctx context.Context) {
+func cmdRequestKeyRegister(ctx context.Context, keyFilePath string) {
 	keys := loadKeys()
+	if keys.Holder != nil {
+		fail("demo-keys.json already holds the request-key holder")
+	}
+	var made struct {
+		ID     int64  `json:"id"`
+		Secret string `json:"secret"`
+	}
+	must(json.Unmarshal(readFile(keyFilePath), &made))
+	_, signer, genErr := verdifax.GenerateRequestKey()
+	must(genErr)
+	holder, holderErr := verdifax.NewClient(verdifax.Config{BaseURL: baseURL(), APIKey: made.Secret, SigningKey: signer})
+	must(holderErr)
+	_, registerErr := holder.RegisterRequestKey(ctx)
+	must(registerErr)
+	all := readKeysJSON()
+	all["holder"] = map[string]any{"id": made.ID, "secret": made.Secret, "signing_key": hex.EncodeToString(signer)}
+	writeKeysJSON(all)
+	fmt.Printf("a request key was registered on key %d, the key Verdifax made for the request-key chapter\n", made.ID)
+}
+
+func cmdRequestKeyRotate(ctx context.Context, holder bool) {
+	role, _, secret, signing := keyFor(loadKeys(), holder)
 	_, next, genErr := verdifax.GenerateRequestKey()
 	must(genErr)
-	_, rotateErr := clientFor(keys.Agent.Secret, keys.Agent.SigningKey).RotateRequestKey(ctx, next)
+	_, rotateErr := clientFor(secret, signing).RotateRequestKey(ctx, next)
 	must(rotateErr)
 	nextHex := hex.EncodeToString(next)
-	writeKeysJSON(withAgentSigningKey(readKeysJSON(), &nextHex))
-	fmt.Println("the agent key's request key was replaced, approved by the key it replaced")
+	writeKeysJSON(withSigningKey(readKeysJSON(), role, &nextHex))
+	fmt.Printf("the %s key's request key was replaced, approved by the key it replaced\n", role)
 }
 
-func cmdRequestKeyClear(ctx context.Context) {
-	keys := loadKeys()
-	must(clientFor(keys.Agent.Secret, keys.Agent.SigningKey).ClearRequestKey(ctx))
-	writeKeysJSON(withAgentSigningKey(readKeysJSON(), nil))
-	fmt.Println("the agent key's request key was cleared, approved by that key")
+func cmdRequestKeyClear(ctx context.Context, holder bool) {
+	role, _, secret, signing := keyFor(loadKeys(), holder)
+	must(clientFor(secret, signing).ClearRequestKey(ctx))
+	writeKeysJSON(withSigningKey(readKeysJSON(), role, nil))
+	fmt.Printf("the %s key's request key was cleared, approved by that key\n", role)
 }
 
-func cmdKeyRevoke(ctx context.Context) {
+func cmdKeyRevoke(ctx context.Context, holder bool) {
 	keys := loadKeys()
+	role, id, _, _ := keyFor(keys, holder)
 	owner := clientFor(keys.Owner.Secret, keys.Owner.SigningKey)
-	must(owner.RevokeAccountKey(ctx, keys.Agent.ID))
+	must(owner.RevokeAccountKey(ctx, id))
 	list, listErr := owner.ListAccountKeys(ctx)
 	must(listErr)
 	writeJSON("account-keys.json", list)
-	fmt.Printf("agent key %d revoked; the records it sealed stay as they were\n", keys.Agent.ID)
+	fmt.Printf("%s key %d revoked; the records it sealed stay as they were\n", role, id)
 }
 
 // replaceWithTombstone replaces a deleted step's record by its tombstone,
@@ -1555,7 +1620,7 @@ func takeFlag(args []string, name string) (bool, []string) {
 
 func main() {
 	ctx := context.Background()
-	usage := "commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-rotate, request-key-clear, key-revoke, delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID"
+	usage := "commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-register KEY_FILE, request-key-rotate [--holder], request-key-clear [--holder], key-revoke [--holder], delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID"
 	if len(os.Args) < 2 {
 		fail(usage)
 	}
@@ -1617,12 +1682,24 @@ func main() {
 			fail("settings takes a SETTING and a VALUE")
 		}
 		cmdSettings(ctx, args[0], args[1])
-	case "request-key-rotate":
-		cmdRequestKeyRotate(ctx)
-	case "request-key-clear":
-		cmdRequestKeyClear(ctx)
-	case "key-revoke":
-		cmdKeyRevoke(ctx)
+	case "request-key-register":
+		if len(args) != 1 {
+			fail("request-key-register takes the KEY_FILE of the key Verdifax made")
+		}
+		cmdRequestKeyRegister(ctx, args[0])
+	case "request-key-rotate", "request-key-clear", "key-revoke":
+		holder, rest := takeFlag(args, "--holder")
+		if len(rest) != 0 {
+			fail(command + " takes only --holder")
+		}
+		switch command {
+		case "request-key-rotate":
+			cmdRequestKeyRotate(ctx, holder)
+		case "request-key-clear":
+			cmdRequestKeyClear(ctx, holder)
+		default:
+			cmdKeyRevoke(ctx, holder)
+		}
 	case "delete-step":
 		if len(args) != 2 {
 			fail("delete-step takes a JOB_ID and a STEP")

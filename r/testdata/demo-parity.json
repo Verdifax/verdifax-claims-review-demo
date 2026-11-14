@@ -92,22 +92,35 @@
       "env": [],
       "writes": []
     },
-    "request-key-rotate": {
+    "request-key-register": {
       "flags": [],
+      "env": [],
+      "writes": [
+        "demo-keys.json"
+      ]
+    },
+    "request-key-rotate": {
+      "flags": [
+        "--holder"
+      ],
       "env": [],
       "writes": [
         "demo-keys.json"
       ]
     },
     "request-key-clear": {
-      "flags": [],
+      "flags": [
+        "--holder"
+      ],
       "env": [],
       "writes": [
         "demo-keys.json"
       ]
     },
     "key-revoke": {
-      "flags": [],
+      "flags": [
+        "--holder"
+      ],
       "env": [],
       "writes": [
         "account-keys.json"

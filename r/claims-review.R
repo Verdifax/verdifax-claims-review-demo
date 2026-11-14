@@ -24,8 +24,9 @@
 #   claims-review unpublish JOB_ID | unpublish --receipt RUN_ID
 #   claims-review approver-add NAME | approver-revoke NAME
 #   claims-review settings owner-replacement|verdifax-deletion allowed|blocked
-#   claims-review request-key-rotate | request-key-clear      the agent key's request key
-#   claims-review key-revoke                                  the owner revokes the agent key
+#   claims-review request-key-register KEY_FILE               the key Verdifax made for the chapter
+#   claims-review request-key-rotate | request-key-clear [--holder]   the agent key's request key, or the holder's
+#   claims-review key-revoke [--holder]                       the owner revokes the agent key, or the holder
 #   claims-review delete-step JOB_ID STEP                     the owner deletes one step
 #   claims-review webhook-subscribe URL | webhook-list | webhook-remove
 #   claims-review feed
@@ -219,14 +220,33 @@ approver_name_error <- function(name) {
 # A named approver's private key file (0600) and public key file.
 approver_files <- function(name) c(paste0("approver-", name, "-key.json"), paste0("approver-", name, ".txt"))
 
+# A key that was ever on the trial tier must keep a request key, and the
+# demo's accounts are trial accounts, so the agent key can replace its request
+# key but never clear it. For the request-key chapter Verdifax makes one
+# production-tier member key in the account, its creation sealed in the feed
+# as Verdifax's: the holder. request-key-register keeps it in demo-keys.json,
+# and --holder makes the request-key commands and key-revoke act on it.
+
+# The keys file with one key's request key replaced, or removed when it was
+# cleared (NULL); role is "agent" or "holder".
+with_signing_key <- function(keys, role, signing_key_hex) {
+  entry <- keys[[role]]
+  entry$signing_key <- NULL
+  if (!is.null(signing_key_hex)) entry$signing_key <- signing_key_hex
+  keys[[role]] <- entry
+  keys
+}
+
 # The keys file with the agent key's request key replaced, or removed when it
 # was cleared (NULL).
-with_agent_signing_key <- function(keys, signing_key_hex) {
-  agent <- keys$agent
-  agent$signing_key <- NULL
-  if (!is.null(signing_key_hex)) agent$signing_key <- signing_key_hex
-  keys$agent <- agent
-  keys
+with_agent_signing_key <- function(keys, signing_key_hex) with_signing_key(keys, "agent", signing_key_hex)
+
+# The key a request-key command or key-revoke acts on: the agent, or with
+# --holder the key Verdifax made for the request-key chapter.
+key_for <- function(keys, holder) {
+  role <- if (isTRUE(holder)) "holder" else "agent"
+  if (is.null(keys[[role]])) fail("demo-keys.json holds no request-key holder; run request-key-register with the key Verdifax made first")
+  list(role = role, key = keys[[role]])
 }
 
 # ── setup ──────────────────────────────────────────────────────────────────
@@ -271,13 +291,20 @@ load_answers <- function(path) {
   jsonlite::fromJSON(path, simplifyVector = FALSE)
 }
 
+# recorded_tokens is the model use a recorded answer declares, 0 when it
+# names none. Only tests against a local server read recorded answers; the
+# budget stops are rehearsed with answers that declare large use. Never part
+# of the answer.
+recorded_tokens <- function(a, field) if (is.null(a[[field]])) 0L else as.integer(a[[field]])
+
 ask <- function(recorded, prompt, user_text, rule_id, model) {
   if (!is.null(recorded)) {
     a <- recorded[[rule_id]]
     return(list(model = if (is.null(a$model)) "recorded-answers" else a$model,
                 response_id = if (is.null(a$response_id)) "recorded" else a$response_id,
                 verdict = a$verdict, reason = a$reason,
-                raw = canonical(list(verdict = a$verdict, reason = a$reason)), input_tokens = 0L, output_tokens = 0L))
+                raw = canonical(list(verdict = a$verdict, reason = a$reason)),
+                input_tokens = recorded_tokens(a, "input_tokens"), output_tokens = recorded_tokens(a, "output_tokens")))
   }
   key <- Sys.getenv("ANTHROPIC_API_KEY", "")
   if (key == "") fail("set ANTHROPIC_API_KEY to call the model")
@@ -342,7 +369,8 @@ ask_structured <- function(recorded_entry, recorded_raw, prompt, user_text, mode
   if (!is.null(recorded_entry)) {
     return(list(model = if (is.null(recorded_entry$model)) "recorded-answers" else recorded_entry$model,
                 response_id = if (is.null(recorded_entry$response_id)) "recorded" else recorded_entry$response_id,
-                raw = recorded_raw, ok = TRUE, input_tokens = 0L, output_tokens = 0L))
+                raw = recorded_raw, ok = TRUE, input_tokens = recorded_tokens(recorded_entry, "input_tokens"),
+                output_tokens = recorded_tokens(recorded_entry, "output_tokens")))
   }
   key <- Sys.getenv("ANTHROPIC_API_KEY", "")
   if (key == "") fail("set ANTHROPIC_API_KEY to call the model")
@@ -936,27 +964,42 @@ write_keys <- function(keys) {
   write_private("demo-keys.json", paste0(as.character(jsonlite::toJSON(keys, auto_unbox = TRUE, pretty = TRUE)), "\n"))
 }
 
-cmd_request_key_rotate <- function() {
+cmd_request_key_register <- function(key_file) {
   keys <- load_keys()
+  if (!is.null(keys$holder)) fail("demo-keys.json already holds the request-key holder")
+  made <- jsonlite::fromJSON(key_file, simplifyVector = FALSE)
+  signer <- verdifax_generate_request_key()
+  holder <- verdifax_client(base_url = base_url(), api_key = made$secret, signing_key = signer$private_key)
+  verdifax_register_request_key(holder)
+  keys$holder <- list(id = made$id, secret = made$secret, signing_key = hex(signer$private_key))
+  write_keys(keys)
+  cat(sprintf("a request key was registered on key %s, the key Verdifax made for the request-key chapter\n", made$id))
+}
+
+cmd_request_key_rotate <- function(holder) {
+  keys <- load_keys()
+  chosen <- key_for(keys, holder)
   next_key <- verdifax_generate_request_key()
-  verdifax_rotate_request_key(client_for(keys$agent), next_key$private_key)
-  write_keys(with_agent_signing_key(keys, hex(next_key$private_key)))
-  cat("the agent key's request key was replaced, approved by the key it replaced\n")
+  verdifax_rotate_request_key(client_for(chosen$key), next_key$private_key)
+  write_keys(with_signing_key(keys, chosen$role, hex(next_key$private_key)))
+  cat(sprintf("the %s key's request key was replaced, approved by the key it replaced\n", chosen$role))
 }
 
-cmd_request_key_clear <- function() {
+cmd_request_key_clear <- function(holder) {
   keys <- load_keys()
-  verdifax_clear_request_key(client_for(keys$agent))
-  write_keys(with_agent_signing_key(keys, NULL))
-  cat("the agent key's request key was cleared, approved by that key\n")
+  chosen <- key_for(keys, holder)
+  verdifax_clear_request_key(client_for(chosen$key))
+  write_keys(with_signing_key(keys, chosen$role, NULL))
+  cat(sprintf("the %s key's request key was cleared, approved by that key\n", chosen$role))
 }
 
-cmd_key_revoke <- function() {
+cmd_key_revoke <- function(holder) {
   keys <- load_keys()
+  chosen <- key_for(keys, holder)
   owner <- client_for(keys$owner)
-  verdifax_revoke_account_key(owner, as.integer(keys$agent$id))
+  verdifax_revoke_account_key(owner, as.integer(chosen$key$id))
   write_json("account-keys.json", verdifax_list_account_keys(owner))
-  cat(sprintf("agent key %s revoked; the records it sealed stay as they were\n", keys$agent$id))
+  cat(sprintf("%s key %s revoked; the records it sealed stay as they were\n", chosen$role, chosen$key$id))
 }
 
 # A deleted step's record is replaced by its tombstone, which verdifax-verify
@@ -1024,7 +1067,7 @@ take_option <- function(args, name) {
 
 main <- function() {
   args <- commandArgs(trailingOnly = TRUE)
-  if (length(args) == 0) fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-rotate, request-key-clear, key-revoke, delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID")
+  if (length(args) == 0) fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-register KEY_FILE, request-key-rotate [--holder], request-key-clear [--holder], key-revoke [--holder], delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID")
   command <- args[1]
   args <- args[-1]
   if (command == "setup") return(cmd_setup())
@@ -1061,9 +1104,17 @@ main <- function() {
     if (length(args) != 2) fail("settings takes a SETTING and a VALUE")
     return(cmd_settings(args[1], args[2]))
   }
-  if (command == "request-key-rotate") return(cmd_request_key_rotate())
-  if (command == "request-key-clear") return(cmd_request_key_clear())
-  if (command == "key-revoke") return(cmd_key_revoke())
+  if (command == "request-key-register") {
+    if (length(args) != 1) fail("request-key-register takes the KEY_FILE of the key Verdifax made")
+    return(cmd_request_key_register(args[1]))
+  }
+  if (command %in% c("request-key-rotate", "request-key-clear", "key-revoke")) {
+    holder <- "--holder" %in% args
+    if (length(setdiff(args, "--holder")) != 0) fail(paste(command, "takes only --holder"))
+    if (command == "request-key-rotate") return(cmd_request_key_rotate(holder))
+    if (command == "request-key-clear") return(cmd_request_key_clear(holder))
+    return(cmd_key_revoke(holder))
+  }
   if (command == "delete-step") {
     if (length(args) != 2) fail("delete-step takes a JOB_ID and a STEP")
     return(cmd_delete_step(args[1], args[2]))
@@ -1079,7 +1130,7 @@ main <- function() {
     if (length(args) != 1) fail("verify-commands takes a JOB_ID")
     return(print_verify_commands(args[1]))
   }
-  fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-rotate, request-key-clear, key-revoke, delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID")
+  fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-register KEY_FILE, request-key-rotate [--holder], request-key-clear [--holder], key-revoke [--holder], delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID")
 }
 
 if (!nzchar(Sys.getenv("CLAIMS_REVIEW_NO_MAIN"))) main()

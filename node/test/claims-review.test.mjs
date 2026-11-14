@@ -10,7 +10,7 @@ import {
   canonical, DELETED_STEP_SUFFIX, deletedSteps, draftClassification, FEED_AGE_REASON, HISTORY_AGE_REASON, loadRules, MIN_VERIFIER, printVerifyCommands,
   MODEL_RETRY_TRIES, readInput, RULE_SET, SAVED_HEAD_MAX_AGE, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
   approverFiles, approverNameError, clientFor, DATA_QUALITY_CHECKS, DATA_QUALITY_SOURCE, dataQuality, POLICY_FILE, REPO, replaceWithTombstone, RULE_SET_SHA256,
-  settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON,
+  settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON, recordedUsage, withSigningKey, keyFor,
 } from "../claims-review.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -197,6 +197,9 @@ test("usage is declared for every model step", () => {
     assert.deepEqual(got, c.want, c.name);
     assert.equal(got === null ? null : canonical(got), c.want_canonical, c.name);
   }
+  for (const c of USAGE.recorded) {
+    assert.deepEqual(recordedUsage(c.answer), { inputTokens: c.want.input_tokens, outputTokens: c.want.output_tokens }, c.name);
+  }
 });
 
 test("the data checks are computed", () => {
@@ -238,6 +241,11 @@ test("the agent's request key in the keys file", () => {
   assert.deepEqual(withAgentSigningKey(c.keys, c.rotated_to), c.after_rotate);
   assert.deepEqual(withAgentSigningKey(c.keys, null), c.after_clear);
   assert.ok(clientFor(c.after_clear.agent), "a key whose request key was cleared still makes a client, which sends unsigned");
+  const h = c.holder;
+  assert.deepEqual(withSigningKey(h.keys, "holder", h.rotated_to), h.after_rotate);
+  assert.deepEqual(withSigningKey(h.keys, "holder", null), h.after_clear);
+  assert.deepEqual(keyFor(h.keys, true), ["holder", h.keys.holder]);
+  assert.deepEqual(keyFor(h.keys, false), ["agent", h.keys.agent]);
 });
 
 test("a deleted step is replaced by its tombstone", () => {

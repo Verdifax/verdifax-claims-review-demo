@@ -148,6 +148,10 @@ for (c in usage_cases$cases) {
   got <- usage_substance(c$usage)
   check(if (is.null(c$want)) is.null(got) else identical(canonical(got), c$want_canonical), paste("usage declared:", c$name))
 }
+for (c in usage_cases$recorded) {
+  check(identical(c(recorded_tokens(c$answer, "input_tokens"), recorded_tokens(c$answer, "output_tokens")),
+                  c(as.integer(c$want$input_tokens), as.integer(c$want$output_tokens))), paste("recorded usage:", c$name))
+}
 quality_cases <- jsonlite::fromJSON(file.path(REPO, "testdata", "data-quality-cases.json"), simplifyVector = FALSE)
 check(identical(RULE_SET_SHA256, quality_cases$rule_set_sha256) && identical(RULE_SET_SHA256, constants$rule_set_sha256) &&
         identical(DATA_QUALITY_CHECKS, unlist(constants$data_quality_checks)) && identical(DATA_QUALITY_SOURCE, constants$data_quality_source),
@@ -174,6 +178,12 @@ check(identical(canonical(with_agent_signing_key(key_case$keys, key_case$rotated
         identical(canonical(with_agent_signing_key(key_case$keys, NULL)), canonical(key_case$after_clear)) &&
         !is.null(client_for(key_case$after_clear$agent)),
       "the agent's request key in the keys file")
+holder_case <- key_case$holder
+check(identical(canonical(with_signing_key(holder_case$keys, "holder", holder_case$rotated_to)), canonical(holder_case$after_rotate)) &&
+        identical(canonical(with_signing_key(holder_case$keys, "holder", NULL)), canonical(holder_case$after_clear)) &&
+        identical(key_for(holder_case$keys, TRUE)$role, "holder") && identical(key_for(holder_case$keys, TRUE)$key$id, 9L) &&
+        identical(key_for(holder_case$keys, FALSE)$role, "agent"),
+      "the holder's request key in the keys file, with --holder")
 delete_case <- command_cases$delete_step
 tomb <- deleted_steps(delete_case$feed, delete_case$job_id)[[delete_case$step]]
 delete_dir <- tempfile("claims-review-")

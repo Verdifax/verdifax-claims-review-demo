@@ -1,0 +1,103 @@
+{
+  "rule-01": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 01.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-02": {
+    "verdict": "fail",
+    "reason": "Recorded test answer: the draft calls the seal tamper-proof and 100% secure.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-03": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 03.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-04": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 04.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-05": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 05.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-06": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 06.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-07": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 07.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-08": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 08.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-09": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 09.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-10": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 10.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-11": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 11.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-12": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 12.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-13": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 13.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-14": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 14.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "rule-15": {
+    "verdict": "pass",
+    "reason": "Recorded test answer: nothing in the draft breaks rule 15.",
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "claims": {
+    "claims": [
+      "The product seals each AI decision into a record.",
+      "Anyone can check a record offline with an open-source verifier."
+    ],
+    "input_tokens": 90000,
+    "output_tokens": 150
+  },
+  "verdict": {
+    "explanation": "Recorded test explanation: the verdict follows from the rule results, and the draft may go out only if every rule passed."
+  }
+}

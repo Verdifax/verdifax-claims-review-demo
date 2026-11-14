@@ -503,6 +503,30 @@ func TestUsageIsDeclaredForEveryModelStep(t *testing.T) {
 			t.Errorf("%s: %s, want %v", c.Name, canonical(got), c.Want)
 		}
 	}
+	var recorded struct {
+		Recorded []struct {
+			Name   string          `json:"name"`
+			Answer json.RawMessage `json:"answer"`
+			Want   struct {
+				InputTokens  int64 `json:"input_tokens"`
+				OutputTokens int64 `json:"output_tokens"`
+			} `json:"want"`
+		} `json:"recorded"`
+	}
+	readCases(t, "usage-cases.json", &recorded)
+	if len(recorded.Recorded) == 0 {
+		t.Fatal("no recorded usage cases")
+	}
+	for _, c := range recorded.Recorded {
+		var a recordedAnswer
+		if err := json.Unmarshal(c.Answer, &a); err != nil {
+			t.Fatal(err)
+		}
+		got := ask(context.Background(), map[string]recordedAnswer{"rule-01": a}, "", "", "rule-01", "")
+		if got.InputTokens != c.Want.InputTokens || got.OutputTokens != c.Want.OutputTokens {
+			t.Errorf("%s: recorded usage %d %d, want %d %d", c.Name, got.InputTokens, got.OutputTokens, c.Want.InputTokens, c.Want.OutputTokens)
+		}
+	}
 }
 
 func TestTheDataChecksAreComputed(t *testing.T) {
@@ -578,6 +602,12 @@ type commandCases struct {
 		RotatedTo   string         `json:"rotated_to"`
 		AfterRotate map[string]any `json:"after_rotate"`
 		AfterClear  map[string]any `json:"after_clear"`
+		Holder      struct {
+			Keys        map[string]any `json:"keys"`
+			RotatedTo   string         `json:"rotated_to"`
+			AfterRotate map[string]any `json:"after_rotate"`
+			AfterClear  map[string]any `json:"after_clear"`
+		} `json:"holder"`
 	} `json:"request_key"`
 }
 
@@ -613,6 +643,24 @@ func TestTheRound62CommandsDecideAlike(t *testing.T) {
 	}
 	if got := withAgentSigningKey(c.RequestKey.Keys, nil); !reflect.DeepEqual(asJSON(t, got), asJSON(t, c.RequestKey.AfterClear)) {
 		t.Errorf("after clear: %v", got)
+	}
+	h := c.RequestKey.Holder
+	if got := withSigningKey(h.Keys, "holder", &h.RotatedTo); !reflect.DeepEqual(asJSON(t, got), asJSON(t, h.AfterRotate)) {
+		t.Errorf("holder after rotate: %v", got)
+	}
+	if got := withSigningKey(h.Keys, "holder", nil); !reflect.DeepEqual(asJSON(t, got), asJSON(t, h.AfterClear)) {
+		t.Errorf("holder after clear: %v", got)
+	}
+	var withHolder keyFile
+	encoded, encodeErr := json.Marshal(h.Keys)
+	if encodeErr != nil || json.Unmarshal(encoded, &withHolder) != nil {
+		t.Fatal("the holder case is not a keys file")
+	}
+	if role, id, _, _ := keyFor(withHolder, true); role != "holder" || id != 9 {
+		t.Errorf("--holder acts on %s %d, want the holder, key 9", role, id)
+	}
+	if role, id, _, _ := keyFor(withHolder, false); role != "agent" || id != 7 {
+		t.Errorf("without --holder %s %d, want the agent, key 7", role, id)
 	}
 	agent := c.RequestKey.AfterClear["agent"].(map[string]any)
 	if clientFor(agent["secret"].(string), "") == nil {

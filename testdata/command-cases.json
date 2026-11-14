@@ -128,6 +128,45 @@
         "id": 7,
         "secret": "vfx_case"
       }
+    },
+    "holder": {
+      "note": "The key Verdifax made at production tier for the request-key chapter: rotated and cleared with --holder, the agent key untouched.",
+      "keys": {
+        "agent": {
+          "id": 7,
+          "secret": "vfx_case",
+          "signing_key": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "holder": {
+          "id": 9,
+          "secret": "vfx_holder_case",
+          "signing_key": "3333333333333333333333333333333333333333333333333333333333333333"
+        }
+      },
+      "rotated_to": "4444444444444444444444444444444444444444444444444444444444444444",
+      "after_rotate": {
+        "agent": {
+          "id": 7,
+          "secret": "vfx_case",
+          "signing_key": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "holder": {
+          "id": 9,
+          "secret": "vfx_holder_case",
+          "signing_key": "4444444444444444444444444444444444444444444444444444444444444444"
+        }
+      },
+      "after_clear": {
+        "agent": {
+          "id": 7,
+          "secret": "vfx_case",
+          "signing_key": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "holder": {
+          "id": 9,
+          "secret": "vfx_holder_case"
+        }
+      }
     }
   },
   "publication": {

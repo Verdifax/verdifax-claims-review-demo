@@ -238,6 +238,8 @@ class Round62(unittest.TestCase):
             got = cr.usage_substance(case["usage"])
             self.assertEqual(got, case["want"], case["name"])
             self.assertEqual(None if got is None else cr.canonical(got), case["want_canonical"], case["name"])
+        for case in USAGE["recorded"]:
+            self.assertEqual(cr.recorded_usage(case["answer"]), case["want"], case["name"])
 
     def test_data_checks_are_computed(self):
         self.assertEqual(cr.RULE_SET_SHA256, QUALITY["rule_set_sha256"])
@@ -279,6 +281,13 @@ class Round62(unittest.TestCase):
         self.assertEqual(cr.with_agent_signing_key(case["keys"], None), case["after_clear"])
         client = cr.client_for(case["after_clear"]["agent"])
         self.assertIsNotNone(client, "a key whose request key was cleared still makes a client, which sends unsigned")
+        holder = case["holder"]
+        self.assertEqual(cr.with_signing_key(holder["keys"], "holder", holder["rotated_to"]), holder["after_rotate"])
+        self.assertEqual(cr.with_signing_key(holder["keys"], "holder", None), holder["after_clear"])
+        self.assertEqual(cr.key_for(holder["keys"], True), ("holder", holder["keys"]["holder"]))
+        self.assertEqual(cr.key_for(holder["keys"], False), ("agent", holder["keys"]["agent"]))
+        with self.assertRaises(SystemExit):
+            cr.key_for(case["keys"], True)
 
     def test_a_deleted_step_is_replaced_by_its_tombstone(self):
         import tempfile

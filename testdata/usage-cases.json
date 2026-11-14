@@ -17,7 +17,7 @@
       "want_canonical": "{\"cost\":{\"input_tokens\":812,\"output_tokens\":164,\"total_tokens\":976}}"
     },
     {
-      "name": "recorded answers in tests, which report no usage",
+      "name": "recorded answers in tests that name no usage",
       "usage": {
         "input_tokens": 0,
         "output_tokens": 0
@@ -51,6 +51,46 @@
       "usage": null,
       "want": null,
       "want_canonical": null
+    }
+  ],
+  "recorded_note": "The usage a recorded answer declares (round 62): tests against a local server read recorded answers, and the budget stops are rehearsed with answers that declare large use. A field the answer leaves out is 0; the usage fields are never part of the answer's text.",
+  "recorded": [
+    {
+      "name": "an answer naming no usage",
+      "answer": {
+        "verdict": "pass",
+        "reason": "r"
+      },
+      "want": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    },
+    {
+      "name": "an answer over the per-run budget",
+      "answer": {
+        "verdict": "pass",
+        "reason": "r",
+        "input_tokens": 104812,
+        "output_tokens": 210
+      },
+      "want": {
+        "input_tokens": 104812,
+        "output_tokens": 210
+      }
+    },
+    {
+      "name": "an answer naming input only",
+      "answer": {
+        "claims": [
+          "a"
+        ],
+        "input_tokens": 90000
+      },
+      "want": {
+        "input_tokens": 90000,
+        "output_tokens": 0
+      }
     }
   ]
 }

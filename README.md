@@ -76,7 +76,7 @@ The commands and the files are the same in every language: a folder set up by on
 | `request-key-rotate` | Replaces the agent key's request key, approved by the key it replaces, and keeps the new one in `demo-keys.json`. |
 | `request-key-clear` | Clears the agent key's request key, approved by that key; the agent then sends unsigned requests. |
 | `key-revoke` | Revokes the agent key as the owner, when its work is done, and writes the account's keys to `account-keys.json`. The records it sealed stay as they were. |
-| `delete-step JOB_ID STEP` | Deletes one step's record as the owner, signed over the record's hash, and replaces `records/<job_id>/steps/STEP.json` with its tombstone from the feed; `verdifax-verify --job` then reads the job as complete except the deleted step. A public record must be withdrawn first. |
+| `delete-step JOB_ID STEP` | Deletes one step's record as the owner, signed over the record's hash, and replaces `records/<job_id>/steps/STEP.json` with `STEP.deleted.json`, its tombstone from the feed; `verdifax-verify --job` then reads the job as complete except the deleted step. A public record must be withdrawn first. |
 | `webhook-subscribe URL` | Subscribes an `https://` address to every kind of event as the owner, and writes the subscription and its secret, shown once, to `webhook.json` with owner-only permissions. |
 | `webhook-list` | Writes the account's webhooks to `webhooks.json` and each one's delivery log to `webhook-deliveries.json`. |
 | `feed` | Reads the account's whole signal feed with the feed key into `signals.json`. Every change the commands above make is in it, each webhook added or removed included from verifier v0.35.0's server release on. |

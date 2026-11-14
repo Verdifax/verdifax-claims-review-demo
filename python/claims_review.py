@@ -23,8 +23,9 @@ Commands (the same in every language of this repository):
   claims-review unpublish JOB_ID | unpublish --receipt RUN_ID
   claims-review approver-add NAME | approver-revoke NAME
   claims-review settings owner-replacement|verdifax-deletion allowed|blocked
-  claims-review request-key-rotate | request-key-clear      the agent key's request key
-  claims-review key-revoke                                  the owner revokes the agent key
+  claims-review request-key-register KEY_FILE               the key Verdifax made for the chapter
+  claims-review request-key-rotate | request-key-clear [--holder]   the agent key's request key, or the holder's
+  claims-review key-revoke [--holder]                       the owner revokes the agent key, or the holder
   claims-review delete-step JOB_ID STEP                     the owner deletes one step
   claims-review webhook-subscribe URL | webhook-list | webhook-remove
   claims-review feed
@@ -238,13 +239,34 @@ def approver_files(name: str) -> tuple[Path, Path]:
 
 
 
+# A key that was ever on the trial tier must keep a request key, and the
+# demo's accounts are trial accounts, so the agent key can replace its request
+# key but never clear it. For the request-key chapter Verdifax makes one
+# production-tier member key in the account, its creation sealed in the feed
+# as Verdifax's: the holder. request-key-register keeps it in demo-keys.json,
+# and --holder makes the request-key commands and key-revoke act on it.
+def with_signing_key(keys: dict[str, Any], role: str, signing_key_hex: Optional[str]) -> dict[str, Any]:
+    """The keys file with one key's request key replaced, or removed when it
+    was cleared; role is "agent" or "holder"."""
+    entry = {k: v for k, v in keys[role].items() if k != "signing_key"}
+    if signing_key_hex is not None:
+        entry["signing_key"] = signing_key_hex
+    return dict(keys, **{role: entry})
+
+
 def with_agent_signing_key(keys: dict[str, Any], signing_key_hex: Optional[str]) -> dict[str, Any]:
     """The keys file with the agent key's request key replaced, or removed
     when it was cleared."""
-    agent = {k: v for k, v in keys["agent"].items() if k != "signing_key"}
-    if signing_key_hex is not None:
-        agent["signing_key"] = signing_key_hex
-    return dict(keys, agent=agent)
+    return with_signing_key(keys, "agent", signing_key_hex)
+
+
+def key_for(keys: dict[str, Any], holder: bool) -> tuple[str, dict[str, Any]]:
+    """The key a request-key command or key-revoke acts on: the agent, or with
+    --holder the key Verdifax made for the request-key chapter."""
+    role = "holder" if holder else "agent"
+    if role not in keys:
+        fail("demo-keys.json holds no request-key holder; run request-key-register with the key Verdifax made first")
+    return role, keys[role]
 
 
 # ── setup ──────────────────────────────────────────────────────────────────
@@ -283,6 +305,13 @@ def cmd_setup(_: argparse.Namespace) -> None:
 
 # ── the model ──────────────────────────────────────────────────────────────
 
+def recorded_usage(a: dict[str, Any]) -> dict[str, int]:
+    """The model use a recorded answer declares, 0 when it names none. Only
+    tests against a local server read recorded answers; the budget stops are
+    rehearsed with answers that declare large use. Never part of the answer."""
+    return {"input_tokens": int(a.get("input_tokens", 0)), "output_tokens": int(a.get("output_tokens", 0))}
+
+
 class Answers:
     """Recorded answers for tests, refused against production."""
 
@@ -298,7 +327,7 @@ class Answers:
             a = self.recorded[rule_id]
             return {"model": a.get("model", "recorded-answers"), "response_id": a.get("response_id", "recorded"),
                     "verdict": a["verdict"], "reason": a["reason"], "raw": canonical({"verdict": a["verdict"], "reason": a["reason"]}),
-                    "input_tokens": 0, "output_tokens": 0}
+                    **recorded_usage(a)}
         import anthropic
         from pydantic import BaseModel
 
@@ -325,7 +354,7 @@ class Answers:
         if self.recorded is not None:
             a = self.recorded["claims"]
             return {"model": a.get("model", "recorded-answers"), "response_id": a.get("response_id", "recorded"),
-                    "claims": a["claims"], "raw": canonical({"claims": a["claims"]}), "input_tokens": 0, "output_tokens": 0}
+                    "claims": a["claims"], "raw": canonical({"claims": a["claims"]}), **recorded_usage(a)}
         import anthropic
         from pydantic import BaseModel
 
@@ -349,7 +378,7 @@ class Answers:
             a = self.recorded["verdict"]
             return {"model": a.get("model", "recorded-answers"), "response_id": a.get("response_id", "recorded"),
                     "explanation": a["explanation"], "raw": canonical({"explanation": a["explanation"]}),
-                    "input_tokens": 0, "output_tokens": 0}
+                    **recorded_usage(a)}
         import anthropic
         from pydantic import BaseModel
 
@@ -816,28 +845,43 @@ def cmd_settings(args: argparse.Namespace) -> None:
     print("%s is %s" % (args.setting, args.value))
 
 
-def cmd_request_key_rotate(_: argparse.Namespace) -> None:
+def cmd_request_key_register(args: argparse.Namespace) -> None:
     keys = load_keys()
-    agent = client_for(keys["agent"])
+    if "holder" in keys:
+        fail("demo-keys.json already holds the request-key holder")
+    made = json.loads(Path(args.key_file).read_text(encoding="utf-8"))
+    signer = verdifax.generate_request_key()
+    holder = verdifax.VerdifaxClient(base_url=base_url(), api_key=made["secret"], signing_key=signer.private_key)
+    holder.register_request_key()
+    entry = {"id": made["id"], "secret": made["secret"], "signing_key": signer.private_key.hex()}
+    write_private(keys_path(), json.dumps(dict(keys, holder=entry), indent=2) + "\n")
+    print("a request key was registered on key %s, the key Verdifax made for the request-key chapter" % made["id"])
+
+
+def cmd_request_key_rotate(args: argparse.Namespace) -> None:
+    keys = load_keys()
+    role, key = key_for(keys, args.holder)
     new = verdifax.generate_request_key()
-    agent.rotate_request_key(new.private_key)
-    write_private(keys_path(), json.dumps(with_agent_signing_key(keys, new.private_key.hex()), indent=2) + "\n")
-    print("the agent key's request key was replaced, approved by the key it replaced")
+    client_for(key).rotate_request_key(new.private_key)
+    write_private(keys_path(), json.dumps(with_signing_key(keys, role, new.private_key.hex()), indent=2) + "\n")
+    print("the %s key's request key was replaced, approved by the key it replaced" % role)
 
 
-def cmd_request_key_clear(_: argparse.Namespace) -> None:
+def cmd_request_key_clear(args: argparse.Namespace) -> None:
     keys = load_keys()
-    client_for(keys["agent"]).clear_request_key()
-    write_private(keys_path(), json.dumps(with_agent_signing_key(keys, None), indent=2) + "\n")
-    print("the agent key's request key was cleared, approved by that key")
+    role, key = key_for(keys, args.holder)
+    client_for(key).clear_request_key()
+    write_private(keys_path(), json.dumps(with_signing_key(keys, role, None), indent=2) + "\n")
+    print("the %s key's request key was cleared, approved by that key" % role)
 
 
-def cmd_key_revoke(_: argparse.Namespace) -> None:
+def cmd_key_revoke(args: argparse.Namespace) -> None:
     keys = load_keys()
+    role, key = key_for(keys, args.holder)
     owner = client_for(keys["owner"])
-    owner.revoke_account_key(int(keys["agent"]["id"]))
+    owner.revoke_account_key(int(key["id"]))
     write_json(Path("account-keys.json"), owner.list_account_keys())
-    print("agent key %s revoked; the records it sealed stay as they were" % keys["agent"]["id"])
+    print("%s key %s revoked; the records it sealed stay as they were" % (role, key["id"]))
 
 
 def replace_with_tombstone(folder: Path, step: str, tombstone: dict[str, Any]) -> None:
@@ -1029,9 +1073,14 @@ def main(argv: Optional[list[str]] = None) -> None:
     settings.add_argument("setting")
     settings.add_argument("value")
     settings.set_defaults(fn=cmd_settings)
-    sub.add_parser("request-key-rotate").set_defaults(fn=cmd_request_key_rotate)
-    sub.add_parser("request-key-clear").set_defaults(fn=cmd_request_key_clear)
-    sub.add_parser("key-revoke").set_defaults(fn=cmd_key_revoke)
+    register = sub.add_parser("request-key-register")
+    register.add_argument("key_file", help="the key Verdifax made for the request-key chapter, as JSON with id and secret")
+    register.set_defaults(fn=cmd_request_key_register)
+    for name, fn in (("request-key-rotate", cmd_request_key_rotate), ("request-key-clear", cmd_request_key_clear),
+                     ("key-revoke", cmd_key_revoke)):
+        holder_cmd = sub.add_parser(name)
+        holder_cmd.add_argument("--holder", action="store_true", help="act on the key Verdifax made for the request-key chapter")
+        holder_cmd.set_defaults(fn=fn)
     delete = sub.add_parser("delete-step")
     delete.add_argument("job_id")
     delete.add_argument("step")

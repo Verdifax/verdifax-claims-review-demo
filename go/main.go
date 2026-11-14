@@ -72,7 +72,7 @@ const (
 	routeRule      = "claims-review/v1/rule-check"
 	routeVerdict   = "claims-review/v1/verdict"
 	objectPrefix   = "claims-review/v1/"
-	minVerifier    = "v0.34.0"
+	minVerifier    = "v0.35.0"
 	// Anthropic's SDKs retry a dropped connection, 408, 409, 429 and any
 	// 5xx, but only twice by default, waiting half a second then one
 	// second. That is too short: on November 13, 2026 a 503 from the
@@ -1207,7 +1207,11 @@ func cmdSignOff(ctx context.Context, jobID, decision, note, receiptRunID, approv
 	must(historyErr)
 	writeText(filepath.Join(folder, "signoff-history.json"), string(history))
 	fmt.Printf("sign-off %s recorded as sequence %d, hash %s\n", decision, record.Sequence, record.SignOffHash)
-	fmt.Printf("verify: verdifax-verify --signoff %s --approver-key %s %s\n", filepath.Join(folder, "signoffs.json"), approverFile, filepath.Join(folder, recordFile))
+	// R272: a sign-off is checked with the account's whole sign-off history, so
+	// a later decision cannot be left out; a rule that requires a sign-off, as
+	// policy v4's verdict-step does, fails the check without it.
+	fmt.Printf("verify: verdifax-verify --signoff %s --signoff-history %s --signoff-head-max-age %s --approver-key %s %s\n", filepath.Join(folder, "signoffs.json"),
+		filepath.Join(folder, "signoff-history.json"), savedHeadMaxAge, approverFile, filepath.Join(folder, recordFile))
 	historyLine, historyReason := historyCheck(filepath.Join(folder, "signoff-history.json"))
 	fmt.Println("verify: " + historyLine)
 	fmt.Println(historyReason)
@@ -1358,14 +1362,16 @@ func printVerifyCommands(jobID string) {
 	}
 	fmt.Printf("  verdifax-verify --job %s%s\n", filepath.Join(folder, "steps"), traces)
 	if _, statErr := os.Stat(filepath.Join(folder, "signoffs.json")); statErr == nil {
-		fmt.Printf("  verdifax-verify --account-policy %s --signoff %s --approver-key approver.txt %s\n", filepath.Join(repo, "policy", policyFile),
-			filepath.Join(folder, "signoffs.json"), filepath.Join(folder, "steps", "verdict.json"))
+		fmt.Printf("  verdifax-verify --account-policy %s --signoff %s --signoff-history %s --signoff-head-max-age %s --approver-key approver.txt %s\n",
+			filepath.Join(repo, "policy", policyFile), filepath.Join(folder, "signoffs.json"), filepath.Join(folder, "signoff-history.json"), savedHeadMaxAge,
+			filepath.Join(folder, "steps", "verdict.json"))
 	} else {
 		fmt.Printf("  verdifax-verify --account-policy %s %s\n", filepath.Join(repo, "policy", policyFile), filepath.Join(folder, "steps", "verdict.json"))
 		fmt.Println("  " + signoffPendingReason)
 	}
 	if _, statErr := os.Stat(filepath.Join(folder, "signoffs.json")); statErr == nil {
-		fmt.Printf("  verdifax-verify --signoff %s --approver-key approver.txt %s\n", filepath.Join(folder, "signoffs.json"), filepath.Join(folder, "steps", "verdict.json"))
+		fmt.Printf("  verdifax-verify --signoff %s --signoff-history %s --signoff-head-max-age %s --approver-key approver.txt %s\n", filepath.Join(folder, "signoffs.json"),
+			filepath.Join(folder, "signoff-history.json"), savedHeadMaxAge, filepath.Join(folder, "steps", "verdict.json"))
 	}
 	if _, statErr := os.Stat(filepath.Join(folder, "signoff-history.json")); statErr == nil {
 		history, historyReason := historyCheck(filepath.Join(folder, "signoff-history.json"))

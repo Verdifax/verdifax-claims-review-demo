@@ -300,7 +300,7 @@ test("the account-policy check passes the sign-offs once given", (t) => {
     t.mock.method(console, "log", (line) => lines.push(line));
     printVerifyCommands(c.job_id);
     t.mock.restoreAll();
-    return lines.filter((l) => l.includes("--account-policy ") || l === `  ${SIGNOFF_PENDING_REASON}`);
+    return lines.filter((l) => l.includes("--account-policy ") || l.startsWith("  verdifax-verify --signoff ") || l === `  ${SIGNOFF_PENDING_REASON}`);
   };
   try {
     process.chdir(folder);

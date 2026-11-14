@@ -67,7 +67,7 @@ ROUTE_VERDICT = "claims-review/v1/verdict"
 OBJECT_PREFIX = "claims-review/v1/"
 LEVELS = ("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
 VERDICTS = ("pass", "fail", "unanswered")
-MIN_VERIFIER = "v0.34.0"
+MIN_VERIFIER = "v0.35.0"
 # Anthropic's SDKs retry a dropped connection, 408, 409, 429 and any 5xx, but
 # only twice by default, waiting half a second then one second. That is too
 # short: on November 13, 2026 a 503 from the model API outlasted it and ended
@@ -790,8 +790,12 @@ def cmd_sign_off(args: argparse.Namespace) -> None:
     write_json(folder / "signoffs.json", agent.get_signoffs(run_id))
     write_json(folder / "signoff-history.json", owner.get_signoff_history())
     print("sign-off %s recorded as sequence %s, hash %s" % (args.decision, record["sequence"], record["signoff_hash"]))
-    print("verify: verdifax-verify --signoff %s --approver-key %s %s" % (folder / "signoffs.json", approver_file,
-          folder / "receipt.json" if args.receipt else folder / "steps" / "verdict.json"))
+    # R272: a sign-off is checked with the account's whole sign-off history, so
+    # a later decision cannot be left out; a rule that requires a sign-off,
+    # as policy v4's verdict-step does, fails the check without it.
+    print("verify: verdifax-verify --signoff %s --signoff-history %s --signoff-head-max-age %s --approver-key %s %s"
+          % (folder / "signoffs.json", folder / "signoff-history.json", SAVED_HEAD_MAX_AGE, approver_file,
+             folder / "receipt.json" if args.receipt else folder / "steps" / "verdict.json"))
     history, history_reason = history_check(folder / "signoff-history.json")
     print("verify: " + history)
     print(history_reason)
@@ -1022,13 +1026,15 @@ def print_verify_commands(job_id: str) -> None:
     traces = " --aivp-traces %s" % (folder / TRACES_FOLDER) if (folder / TRACES_FOLDER).is_dir() else ""
     print("  verdifax-verify --job %s%s" % (folder / "steps", traces))
     if (folder / "signoffs.json").exists():
-        print("  verdifax-verify --account-policy %s --signoff %s --approver-key approver.txt %s"
-              % (REPO / "policy" / POLICY_FILE, folder / "signoffs.json", folder / "steps" / "verdict.json"))
+        print("  verdifax-verify --account-policy %s --signoff %s --signoff-history %s --signoff-head-max-age %s --approver-key approver.txt %s"
+              % (REPO / "policy" / POLICY_FILE, folder / "signoffs.json", folder / "signoff-history.json", SAVED_HEAD_MAX_AGE,
+                 folder / "steps" / "verdict.json"))
     else:
         print("  verdifax-verify --account-policy %s %s" % (REPO / "policy" / POLICY_FILE, folder / "steps" / "verdict.json"))
         print("  " + SIGNOFF_PENDING_REASON)
     if (folder / "signoffs.json").exists():
-        print("  verdifax-verify --signoff %s --approver-key approver.txt %s" % (folder / "signoffs.json", folder / "steps" / "verdict.json"))
+        print("  verdifax-verify --signoff %s --signoff-history %s --signoff-head-max-age %s --approver-key approver.txt %s"
+              % (folder / "signoffs.json", folder / "signoff-history.json", SAVED_HEAD_MAX_AGE, folder / "steps" / "verdict.json"))
     if (folder / "signoff-history.json").exists():
         history, history_reason = history_check(folder / "signoff-history.json")
         print("  " + history)

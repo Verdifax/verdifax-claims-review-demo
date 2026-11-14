@@ -217,7 +217,7 @@ policy_path <- file.path(REPO, "policy", POLICY_FILE)
 vc_want <- function(lines) vapply(lines, function(l) sub("SIGNOFF_PENDING_REASON", SIGNOFF_PENDING_REASON, sub("POLICY", policy_path, l, fixed = TRUE), fixed = TRUE), "", USE.NAMES = FALSE)
 vc_printed <- function() {
   out <- capture.output(print_verify_commands(vc$job_id))
-  out[grepl("--account-policy ", out, fixed = TRUE) | out == paste0("  ", SIGNOFF_PENDING_REASON)]
+  out[grepl("--account-policy ", out, fixed = TRUE) | startsWith(out, "  verdifax-verify --signoff ") | out == paste0("  ", SIGNOFF_PENDING_REASON)]
 }
 vc_dir <- tempfile("claims-review-")
 dir.create(file.path(vc_dir, "records", vc$job_id, "steps"), recursive = TRUE)

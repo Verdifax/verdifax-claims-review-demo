@@ -22,7 +22,7 @@ The same program is here in Python, Node, Go and R, built on the Verdifax SDK in
 6. **Publish.** The account's owner key makes the job's records public on random links, or withdraws them. Each decision is sealed by Verdifax as a run publication with its place in the feed, so an auditor sees who made what public and when.
 7. **Feed.** The refusals, the halts, the sign-offs, the publications, the deletions and every change to the account's keys, approvers and settings appear in the account's signal feed, as a GRC system would receive them; a webhook can receive each one as it happens.
 
-Every record and its place in the job is anchored on the public log, and `verdifax-verify` checks it all offline. Records sealed under the demo's version 4 policy, with the agent name, the data checks and the verdict's sign-off requirement, are read by the release the commands below name. Records sealed under the version 3 policy are read in full since v0.28.0, which hashes its review requirement and runs it again, and records sealed under the version 2 policy, before the claims step, verify since v0.27.0. The verify commands below use what the verifier has done since v0.34.0: it limits the age of a saved history's or feed's head statement, which the commands set explicitly, and reads a deleted step's tombstone in the step's place.
+Every record and its place in the job is anchored on the public log, and `verdifax-verify` checks it all offline. Records sealed under the demo's version 4 policy, with the agent name, the data checks and the verdict's sign-off requirement, are read in full from v0.35.0, the first release that reads the webhook changes in the account's feed. Records sealed under the version 3 policy are read in full since v0.28.0, which hashes its review requirement and runs it again, and records sealed under the version 2 policy, before the claims step, verify since v0.27.0. The verify commands below use what the verifier has done since v0.34.0: it limits the age of a saved history's or feed's head statement, which the commands set explicitly, and reads a deleted step's tombstone in the step's place.
 
 ## Run it on your own drafts
 
@@ -86,12 +86,12 @@ The commands and the files are the same in every language: a folder set up by on
 
 ## Check the results offline
 
-Install `verdifax-verify` from [github.com/Verdifax/verdifax-verify](https://github.com/Verdifax/verdifax-verify). It reads every part of these records since v0.28.0. The commands below use the flags it has had since v0.34.0, which limit the age of a saved history's or feed's head statement (24 hours unless the flag says otherwise), and since that release it reads a deleted step's tombstone. Then, in the folder the program used:
+Install `verdifax-verify` from [github.com/Verdifax/verdifax-verify](https://github.com/Verdifax/verdifax-verify). It reads every part of these records, and the account's feed with its webhook changes, from v0.35.0; records sealed under the version 3 policy are read in full since v0.28.0. The commands below use the flags it has had since v0.34.0, which limit the age of a saved history's or feed's head statement (24 hours unless the flag says otherwise), and since that release it reads a deleted step's tombstone. Then, in the folder the program used:
 
 ```bash
 verdifax-verify --job records/<job_id>/steps --aivp-traces records/<job_id>/traces
 verdifax-verify --account-policy /path/to/verdifax-claims-review-demo/policy/claims-review-v4.json records/<job_id>/steps/verdict.json
-verdifax-verify --signoff records/<job_id>/signoffs.json --approver-key approver.txt records/<job_id>/steps/verdict.json
+verdifax-verify --signoff records/<job_id>/signoffs.json --signoff-history records/<job_id>/signoff-history.json --signoff-head-max-age 168h --approver-key approver.txt records/<job_id>/steps/verdict.json
 # 168h: a saved history is checked as of when it was fetched; raise the limit for an older copy, or run sign-off again to fetch it fresh
 verdifax-verify --signoff-history records/<job_id>/signoff-history.json --signoff-head-max-age 168h
 # 168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh

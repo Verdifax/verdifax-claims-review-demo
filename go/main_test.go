@@ -790,7 +790,7 @@ func TestTheAccountPolicyCheckPassesTheSignOffsOnceGiven(t *testing.T) {
 		}
 		kept := []string{}
 		for _, l := range strings.Split(string(raw), "\n") {
-			if strings.Contains(l, "--account-policy ") || l == "  "+signoffPendingReason {
+			if strings.Contains(l, "--account-policy ") || strings.HasPrefix(l, "  verdifax-verify --signoff ") || l == "  "+signoffPendingReason {
 				kept = append(kept, l)
 			}
 		}

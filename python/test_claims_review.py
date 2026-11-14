@@ -342,7 +342,7 @@ class Round62(unittest.TestCase):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 cr.print_verify_commands(case["job_id"])
-            return [l for l in out.getvalue().splitlines() if "--account-policy " in l or l == "  " + cr.SIGNOFF_PENDING_REASON]
+            return [l for l in out.getvalue().splitlines() if "--account-policy " in l or l.startswith("  verdifax-verify --signoff ") or l == "  " + cr.SIGNOFF_PENDING_REASON]
         def want(lines: list) -> list:
             return [l.replace("POLICY", policy).replace("SIGNOFF_PENDING_REASON", cr.SIGNOFF_PENDING_REASON) for l in lines]
         here = os.getcwd()

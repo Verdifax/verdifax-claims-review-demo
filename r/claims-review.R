@@ -55,7 +55,7 @@ ROUTE_RULE <- "claims-review/v1/rule-check"
 ROUTE_VERDICT <- "claims-review/v1/verdict"
 OBJECT_PREFIX <- "claims-review/v1/"
 LEVELS <- c("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
-MIN_VERIFIER <- "v0.34.0"
+MIN_VERIFIER <- "v0.35.0"
 # A stopped step's records live in records/stopped-<run_id>/, and the
 # model's exact answers in answers/ beside each job's steps/.
 STOPPED_FOLDER_PREFIX <- "stopped-"
@@ -812,7 +812,11 @@ cmd_sign_off <- function(job_id, decision, note, receipt_run_id, approver = NULL
   write_text(file.path(folder, "signoffs.json"), verdifax_get_signoffs(agent, run_id))
   write_text(file.path(folder, "signoff-history.json"), verdifax_get_signoff_history(owner))
   cat(sprintf("sign-off %s recorded as sequence %s, hash %s\n", decision, record$sequence, record$signoff_hash))
-  cat(sprintf("verify: verdifax-verify --signoff %s --approver-key %s %s\n", file.path(folder, "signoffs.json"), approver_file, file.path(folder, record_file)))
+  # R272: a sign-off is checked with the account's whole sign-off history, so
+  # a later decision cannot be left out; a rule that requires a sign-off, as
+  # policy v4's verdict-step does, fails the check without it.
+  cat(sprintf("verify: verdifax-verify --signoff %s --signoff-history %s --signoff-head-max-age %s --approver-key %s %s\n", file.path(folder, "signoffs.json"),
+              file.path(folder, "signoff-history.json"), SAVED_HEAD_MAX_AGE, approver_file, file.path(folder, record_file)))
   history <- history_check(file.path(folder, "signoff-history.json"))
   cat(sprintf("verify: %s\n%s\n", history[1], history[2]))
 }
@@ -899,14 +903,16 @@ print_verify_commands <- function(job_id) {
   traces <- if (dir.exists(file.path(folder, TRACES_FOLDER))) paste0(" --aivp-traces ", file.path(folder, TRACES_FOLDER)) else ""
   cat(sprintf("  verdifax-verify --job %s%s\n", file.path(folder, "steps"), traces))
   if (file.exists(file.path(folder, "signoffs.json"))) {
-    cat(sprintf("  verdifax-verify --account-policy %s --signoff %s --approver-key approver.txt %s\n", file.path(REPO, "policy", POLICY_FILE),
-                file.path(folder, "signoffs.json"), file.path(folder, "steps", "verdict.json")))
+    cat(sprintf("  verdifax-verify --account-policy %s --signoff %s --signoff-history %s --signoff-head-max-age %s --approver-key approver.txt %s\n",
+                file.path(REPO, "policy", POLICY_FILE), file.path(folder, "signoffs.json"), file.path(folder, "signoff-history.json"), SAVED_HEAD_MAX_AGE,
+                file.path(folder, "steps", "verdict.json")))
   } else {
     cat(sprintf("  verdifax-verify --account-policy %s %s\n", file.path(REPO, "policy", POLICY_FILE), file.path(folder, "steps", "verdict.json")))
     cat(paste0("  ", SIGNOFF_PENDING_REASON, "\n"))
   }
   if (file.exists(file.path(folder, "signoffs.json"))) {
-    cat(sprintf("  verdifax-verify --signoff %s --approver-key approver.txt %s\n", file.path(folder, "signoffs.json"), file.path(folder, "steps", "verdict.json")))
+    cat(sprintf("  verdifax-verify --signoff %s --signoff-history %s --signoff-head-max-age %s --approver-key approver.txt %s\n", file.path(folder, "signoffs.json"),
+                file.path(folder, "signoff-history.json"), SAVED_HEAD_MAX_AGE, file.path(folder, "steps", "verdict.json")))
   }
   if (file.exists(file.path(folder, "signoff-history.json"))) {
     history <- history_check(file.path(folder, "signoff-history.json"))

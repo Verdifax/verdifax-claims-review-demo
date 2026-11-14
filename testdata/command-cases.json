@@ -187,14 +187,15 @@
     ]
   },
   "verify_commands": {
-    "note": "The account-policy check of a verdict passes its sign-offs once they exist; before, it is printed with the reason it exits 4.",
+    "note": "The account-policy and sign-off checks of a verdict pass its sign-offs and the account's sign-off history once they exist (R272: a rule that requires a sign-off fails without the history); before, the account-policy check is printed with the reason it exits 4.",
     "job_id": "job-1",
     "without_signoffs": [
       "  verdifax-verify --account-policy POLICY records/job-1/steps/verdict.json",
       "  SIGNOFF_PENDING_REASON"
     ],
     "with_signoffs": [
-      "  verdifax-verify --account-policy POLICY --signoff records/job-1/signoffs.json --approver-key approver.txt records/job-1/steps/verdict.json"
+      "  verdifax-verify --account-policy POLICY --signoff records/job-1/signoffs.json --signoff-history records/job-1/signoff-history.json --signoff-head-max-age 168h --approver-key approver.txt records/job-1/steps/verdict.json",
+      "  verdifax-verify --signoff records/job-1/signoffs.json --signoff-history records/job-1/signoff-history.json --signoff-head-max-age 168h --approver-key approver.txt records/job-1/steps/verdict.json"
     ]
   }
 }

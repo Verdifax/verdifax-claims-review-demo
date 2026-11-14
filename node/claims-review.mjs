@@ -56,7 +56,7 @@ const ROUTE_RULE = "claims-review/v1/rule-check";
 const ROUTE_VERDICT = "claims-review/v1/verdict";
 const OBJECT_PREFIX = "claims-review/v1/";
 const LEVELS = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI"];
-const MIN_VERIFIER = "v0.34.0";
+const MIN_VERIFIER = "v0.35.0";
 // Anthropic's SDKs retry a dropped connection, 408, 409, 429 and any 5xx, but
 // only twice by default, waiting half a second then one second. That is too
 // short: on November 13, 2026 a 503 from the model API outlasted it and ended
@@ -775,7 +775,10 @@ async function cmdSignOff(jobId, decision, note, receiptRunId, approverName) {
   writeJSON(join(folder, "signoff-history.json"), await owner.getSignOffHistory());
   console.log(`sign-off ${decision} recorded as sequence ${record.sequence}, hash ${record.signoff_hash}`);
   const recordFile = receiptRunId ? join(folder, "receipt.json") : join(folder, "steps", "verdict.json");
-  console.log(`verify: verdifax-verify --signoff ${join(folder, "signoffs.json")} --approver-key ${approverFile} ${recordFile}`);
+  // R272: a sign-off is checked with the account's whole sign-off history, so
+  // a later decision cannot be left out; a rule that requires a sign-off, as
+  // policy v4's verdict-step does, fails the check without it.
+  console.log(`verify: verdifax-verify --signoff ${join(folder, "signoffs.json")} --signoff-history ${join(folder, "signoff-history.json")} --signoff-head-max-age ${SAVED_HEAD_MAX_AGE} --approver-key ${approverFile} ${recordFile}`);
   const [history, historyReason] = historyCheck(join(folder, "signoff-history.json"));
   console.log(`verify: ${history}`);
   console.log(historyReason);
@@ -988,13 +991,13 @@ function printVerifyCommands(jobId) {
   const traces = existsSync(join(folder, TRACES_FOLDER)) ? ` --aivp-traces ${join(folder, TRACES_FOLDER)}` : "";
   console.log(`  verdifax-verify --job ${join(folder, "steps")}${traces}`);
   if (existsSync(join(folder, "signoffs.json"))) {
-    console.log(`  verdifax-verify --account-policy ${join(REPO, "policy", POLICY_FILE)} --signoff ${join(folder, "signoffs.json")} --approver-key approver.txt ${join(folder, "steps", "verdict.json")}`);
+    console.log(`  verdifax-verify --account-policy ${join(REPO, "policy", POLICY_FILE)} --signoff ${join(folder, "signoffs.json")} --signoff-history ${join(folder, "signoff-history.json")} --signoff-head-max-age ${SAVED_HEAD_MAX_AGE} --approver-key approver.txt ${join(folder, "steps", "verdict.json")}`);
   } else {
     console.log(`  verdifax-verify --account-policy ${join(REPO, "policy", POLICY_FILE)} ${join(folder, "steps", "verdict.json")}`);
     console.log(`  ${SIGNOFF_PENDING_REASON}`);
   }
   if (existsSync(join(folder, "signoffs.json"))) {
-    console.log(`  verdifax-verify --signoff ${join(folder, "signoffs.json")} --approver-key approver.txt ${join(folder, "steps", "verdict.json")}`);
+    console.log(`  verdifax-verify --signoff ${join(folder, "signoffs.json")} --signoff-history ${join(folder, "signoff-history.json")} --signoff-head-max-age ${SAVED_HEAD_MAX_AGE} --approver-key approver.txt ${join(folder, "steps", "verdict.json")}`);
   }
   if (existsSync(join(folder, "signoff-history.json"))) {
     const [history, historyReason] = historyCheck(join(folder, "signoff-history.json"));

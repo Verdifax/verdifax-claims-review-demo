@@ -57,7 +57,7 @@ ROUTE_RULE <- "claims-review/v1/rule-check"
 ROUTE_VERDICT <- "claims-review/v1/verdict"
 OBJECT_PREFIX <- "claims-review/v1/"
 LEVELS <- c("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
-MIN_VERIFIER <- "v0.35.0"
+MIN_VERIFIER <- "v0.36.0"
 # A stopped step's records live in records/stopped-<run_id>/, and the
 # model's exact answers in answers/ beside each job's steps/.
 STOPPED_FOLDER_PREFIX <- "stopped-"

@@ -75,7 +75,7 @@ const (
 	routeRule      = "claims-review/v1/rule-check"
 	routeVerdict   = "claims-review/v1/verdict"
 	objectPrefix   = "claims-review/v1/"
-	minVerifier    = "v0.35.0"
+	minVerifier    = "v0.36.0"
 	// Anthropic's SDKs retry a dropped connection, 408, 409, 429 and any
 	// 5xx, but only twice by default, waiting half a second then one
 	// second. That is too short: on November 13, 2026 a 503 from the

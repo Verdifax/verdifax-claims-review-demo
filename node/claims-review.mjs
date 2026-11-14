@@ -58,7 +58,7 @@ const ROUTE_RULE = "claims-review/v1/rule-check";
 const ROUTE_VERDICT = "claims-review/v1/verdict";
 const OBJECT_PREFIX = "claims-review/v1/";
 const LEVELS = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI"];
-const MIN_VERIFIER = "v0.35.0";
+const MIN_VERIFIER = "v0.36.0";
 // Anthropic's SDKs retry a dropped connection, 408, 409, 429 and any 5xx, but
 // only twice by default, waiting half a second then one second. That is too
 // short: on November 13, 2026 a 503 from the model API outlasted it and ended

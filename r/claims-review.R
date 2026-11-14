@@ -17,17 +17,26 @@
 #
 #   claims-review setup                              owner key in VERDIFAX_OWNER_KEY
 #   claims-review review DRAFT.md [--model ID]        model key in ANTHROPIC_API_KEY
-#   claims-review sign-off JOB_ID approve|reject [--note TEXT]
-#   claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT]
+#   claims-review review DRAFT.md --without-actor     the gate step names no agent
+#   claims-review sign-off JOB_ID approve|reject [--note TEXT] [--approver NAME]
+#   claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT] [--approver NAME]
 #   claims-review publish JOB_ID | publish --receipt RUN_ID
 #   claims-review unpublish JOB_ID | unpublish --receipt RUN_ID
+#   claims-review approver-add NAME | approver-revoke NAME
+#   claims-review settings owner-replacement|verdifax-deletion allowed|blocked
+#   claims-review request-key-rotate | request-key-clear      the agent key's request key
+#   claims-review key-revoke                                  the owner revokes the agent key
+#   claims-review delete-step JOB_ID STEP                     the owner deletes one step
+#   claims-review webhook-subscribe URL | webhook-list | webhook-remove
 #   claims-review feed
 #   claims-review verify-commands JOB_ID
 #
 # Environment: VERDIFAX_BASE_URL (default https://api.verdifax.com).
 # Files, in the working folder: demo-keys.json and approver-key.json (0600),
 # approver.txt, account-history.json, records/<job_id>/*.json with payloads/,
-# signals.json.
+# signals.json; approver-<name>-key.json (0600), approver-<name>.txt and
+# approvers.json; account-keys.json; webhook.json (0600), webhooks.json and
+# webhook-deliveries.json.
 
 suppressPackageStartupMessages({
   library(verdifax)
@@ -53,8 +62,23 @@ ANSWERS_FOLDER <- "answers"
 # The text the server's AI review checked for each step, as the server
 # returned it once: a reader re-runs the review's check from these files.
 TRACES_FOLDER <- "traces"
-# The account policy setup activates; v1 stays for records sealed under it.
-POLICY_FILE <- "claims-review-v3.json"
+# The account policy setup activates; v1 to v3 stay for records sealed
+# under them. v3 requires a reviewed AI answer on every step after the gate;
+# v4 adds that every step names its agent (required_attested_fields), that
+# each verdict needs a person's sign-off, and that every step after the gate
+# passes its declared data checks.
+POLICY_FILE <- "claims-review-v4.json"
+# The rule set's pinned hash, which the rule_set_pinned data check compares.
+RULE_SET_SHA256 <- "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98ae7"
+# The data checks every step declares in policy_context.data_quality, each
+# computed: draft_unchanged (the draft re-read before the step has the hash
+# sealed at intake) and rule_set_pinned (the rule set's hash is the pin).
+DATA_QUALITY_CHECKS <- c("draft_unchanged", "rule_set_pinned")
+DATA_QUALITY_SOURCE <- "claims-review draft and rule set"
+# The owner's two blocks on Verdifax, and their values.
+ACCOUNT_SETTINGS <- c("owner-replacement", "verdifax-deletion")
+SETTING_VALUES <- c("allowed", "blocked")
+APPROVER_NAME <- "^[a-z0-9-]{1,40}$"
 # The AI's work on the steps after the gate: listing the draft's claims, and
 # explaining the verdict code decided.
 CLAIMS_PROMPT <- "claims-prompt-v1.txt"
@@ -67,6 +91,9 @@ DELETED_STEP_SUFFIX <- ".deleted.json"
 # every printed re-check states the limit on its head statement's age (R246).
 SAVED_HEAD_MAX_AGE <- "168h"
 HISTORY_AGE_REASON <- "(168h: a saved history is checked as of when it was fetched; raise the limit for an older copy, or run sign-off again to fetch it fresh)"
+# Printed under the account-policy check of a verdict with no sign-off yet:
+# policy v4 requires one, so the verifier exits 4 until it is given.
+SIGNOFF_PENDING_REASON <- "(exit 4, ANCHORED, SIGN-OFF NOT SHOWN, until a sign-off is given: the policy requires one on the verdict; run sign-off, then verify-commands again)"
 FEED_AGE_REASON <- "(168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh)"
 
 script_dir <- function() {
@@ -154,7 +181,53 @@ load_keys <- function() {
   if (!file.exists("demo-keys.json")) fail("no demo-keys.json here; run `claims-review setup` first")
   jsonlite::fromJSON("demo-keys.json", simplifyVector = FALSE)
 }
-client_for <- function(key) verdifax_client(base_url = base_url(), api_key = key$secret, signing_key = unhex(key$signing_key))
+# A client for a key; one whose request key was cleared sends unsigned.
+client_for <- function(key) {
+  if (is.null(key$signing_key) || !nzchar(key$signing_key)) return(verdifax_client(base_url = base_url(), api_key = key$secret))
+  verdifax_client(base_url = base_url(), api_key = key$secret, signing_key = unhex(key$signing_key))
+}
+
+# The request_substance a step declares: the model's own usage report for the
+# step's model call, so the server's budgets count real tokens. The gate step
+# calls no model and declares none (NULL).
+usage_substance <- function(usage) {
+  if (is.null(usage)) return(NULL)
+  list(cost = list(input_tokens = usage$input_tokens, output_tokens = usage$output_tokens,
+                   total_tokens = usage$input_tokens + usage$output_tokens))
+}
+
+# The data checks a step declares, each computed (round 62).
+data_quality <- function(intake_draft_sha256, draft_sha256_now, rule_set_hash, as_of) {
+  result <- function(ok) if (ok) "pass" else "fail"
+  list(source = DATA_QUALITY_SOURCE, as_of = as_of, checks = list(
+    list(name = DATA_QUALITY_CHECKS[1], result = result(identical(draft_sha256_now, intake_draft_sha256))),
+    list(name = DATA_QUALITY_CHECKS[2], result = result(identical(rule_set_hash, RULE_SET_SHA256)))))
+}
+
+# Why a settings command is refused before anything is sent, or NULL.
+setting_error <- function(setting, value) {
+  if (!setting %in% ACCOUNT_SETTINGS) return(sprintf("the setting must be %s, not %s", paste(ACCOUNT_SETTINGS, collapse = " or "), setting))
+  if (!value %in% SETTING_VALUES) return(sprintf("the value must be %s, not %s", paste(SETTING_VALUES, collapse = " or "), value))
+  NULL
+}
+
+approver_name_error <- function(name) {
+  if (!grepl(APPROVER_NAME, name)) return("an approver name is 1 to 40 lowercase letters, digits or dashes")
+  NULL
+}
+
+# A named approver's private key file (0600) and public key file.
+approver_files <- function(name) c(paste0("approver-", name, "-key.json"), paste0("approver-", name, ".txt"))
+
+# The keys file with the agent key's request key replaced, or removed when it
+# was cleared (NULL).
+with_agent_signing_key <- function(keys, signing_key_hex) {
+  agent <- keys$agent
+  agent$signing_key <- NULL
+  if (!is.null(signing_key_hex)) agent$signing_key <- signing_key_hex
+  keys$agent <- agent
+  keys
+}
 
 # ── setup ──────────────────────────────────────────────────────────────────
 
@@ -318,9 +391,13 @@ measured_cost <- function(model, input_tokens, output_tokens) {
 
 # ── review ─────────────────────────────────────────────────────────────────
 
-policy_context <- function(object_id, level) list(object_type = "text", object_id = paste0(OBJECT_PREFIX, object_id), classification = level)
+# A step's policy context: its object, the draft's classification and the
+# step's data checks.
+policy_context <- function(object_id, level, quality) {
+  list(object_type = "text", object_id = paste0(OBJECT_PREFIX, object_id), classification = level, data_quality = quality)
+}
 
-cmd_review <- function(draft_path, model, answers_path) {
+cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
   keys <- load_keys()
   agent <- client_for(keys$agent)
   loaded <- load_rules()
@@ -330,6 +407,10 @@ cmd_review <- function(draft_path, model, answers_path) {
   draft <- read_text(draft_path)
   draft_hash <- sha256_hex(draft)
   level <- draft_classification(draft)
+  # The time the draft was read: the as_of of every step's data checks.
+  read_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+  # The data checks, computed again now, the draft re-read.
+  quality <- function() data_quality(draft_hash, sha256_hex(read_text(draft_path)), rule_set_hash, read_at)
   recorded <- load_answers(answers_path)
   now <- format(Sys.time(), "%Y%m%dT%H%M%SZ", tz = "UTC")
   job_id <- sprintf("claims-review-%s-%s", substr(draft_hash, 1, 12), now)
@@ -342,7 +423,12 @@ cmd_review <- function(draft_path, model, answers_path) {
   intake <- tryCatch(
     verdifax_job_step(job, "intake", after = list(), payload = canonical(intake_payload), program_id = PROGRAM_ID,
                       route_id = ROUTE_INTAKE, registry_record_hash = REGISTRY_RECORD_HASH,
-                      policy_context = policy_context("intake", level)),
+                      # The gate step names its agent, as policy v4 requires of
+                      # every step; --without-actor leaves the name out on
+                      # purpose, so the policy refuses the draft here, before
+                      # any model is called.
+                      attested_context = if (without_actor) NULL else list(attested = TRUE, actor_id = ACTOR_ID),
+                      policy_context = policy_context("intake", level, quality())),
     httr2_http = function(e) e)
   if (inherits(intake, "error")) {
     # The account policy refused the draft at intake (for example a
@@ -381,10 +467,11 @@ cmd_review <- function(draft_path, model, answers_path) {
   claims_step <- tryCatch(
     verdifax_job_step(job, "claims", after = list("intake"), payload = canonical(claims_payload), program_id = PROGRAM_ID,
                       route_id = ROUTE_CLAIMS, registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = listed$raw,
+                      request_substance = usage_substance(list(input_tokens = listed$input_tokens, output_tokens = listed$output_tokens)),
                       attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
                                               model_name = listed$model, prompt_hash = claims_prompt_hash,
                                               decision_kind = "claims.list", decision_result = as.character(length(listed$claims))),
-                      policy_context = policy_context("claims", level)),
+                      policy_context = policy_context("claims", level, quality())),
     httr2_http = function(e) e)
   if (inherits(claims_step, "error")) {
     payloads$claims <- claims_payload
@@ -413,10 +500,11 @@ cmd_review <- function(draft_path, model, answers_path) {
     receipt <- tryCatch(
       verdifax_job_step(job, rule$id, after = list("claims"), payload = canonical(payload), program_id = PROGRAM_ID,
                         route_id = ROUTE_RULE, registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = ai_text,
+                        request_substance = usage_substance(list(input_tokens = answer$input_tokens, output_tokens = answer$output_tokens)),
                         attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
                                                 model_name = answer$model, prompt_hash = prompt_hash,
                                                 decision_kind = "claims.rule_check", decision_result = answer$verdict),
-                        policy_context = policy_context(rule$id, level)),
+                        policy_context = policy_context(rule$id, level, quality())),
       httr2_http = function(e) e)
     if (inherits(receipt, "error")) {
       # The account policy, the server's content screen or its review of
@@ -457,10 +545,11 @@ cmd_review <- function(draft_path, model, answers_path) {
     verdifax_job_step(job, "verdict", after = as_list(vapply(rules, function(r) r$id, character(1))), final = TRUE,
                       payload = canonical(verdict_payload), program_id = PROGRAM_ID, route_id = ROUTE_VERDICT,
                       registry_record_hash = REGISTRY_RECORD_HASH, ai_output_text = explained$raw,
+                      request_substance = usage_substance(list(input_tokens = explained$input_tokens, output_tokens = explained$output_tokens)),
                       attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
                                               model_name = explained$model, prompt_hash = verdict_prompt_hash,
                                               decision_kind = "claims.verdict", decision_result = verdict),
-                      policy_context = policy_context("verdict", level)),
+                      policy_context = policy_context("verdict", level, quality())),
     httr2_http = function(e) e)
   if (inherits(final, "error")) {
     payloads$verdict <- verdict_payload
@@ -664,16 +753,20 @@ feed_check <- function() c(sprintf("verdifax-verify --signals signals.json --fee
 
 # ── sign-off ───────────────────────────────────────────────────────────────
 
-approver_private_key <- function() {
-  if (!file.exists("approver-key.json")) fail("no approver-key.json here; run `claims-review setup` first")
-  unhex(jsonlite::fromJSON("approver-key.json", simplifyVector = FALSE)$private_key)
+# The first approver's private key, or a named approver's.
+approver_private_key <- function(name = NULL) {
+  path <- if (is.null(name)) "approver-key.json" else approver_files(name)[1]
+  if (!file.exists(path)) fail(sprintf("no %s here; run `claims-review %s` first", path, if (is.null(name)) "setup" else paste("approver-add", name)))
+  unhex(jsonlite::fromJSON(path, simplifyVector = FALSE)$private_key)
 }
 
-cmd_sign_off <- function(job_id, decision, note, receipt_run_id) {
+cmd_sign_off <- function(job_id, decision, note, receipt_run_id, approver = NULL) {
+  if (!is.null(approver) && !is.null(approver_name_error(approver))) fail(approver_name_error(approver))
   keys <- load_keys()
   agent <- client_for(keys$agent)
   owner <- client_for(keys$owner)
-  key <- approver_private_key()
+  key <- approver_private_key(approver)
+  approver_file <- if (is.null(approver)) "approver.txt" else approver_files(approver)[2]
   if (!is.null(receipt_run_id)) {
     run_id <- as.integer(receipt_run_id)
     target <- list(kind = "receipt", run_id = run_id, digest = stop_receipt_hash(agent, run_id))
@@ -691,7 +784,7 @@ cmd_sign_off <- function(job_id, decision, note, receipt_run_id) {
   write_text(file.path(folder, "signoffs.json"), verdifax_get_signoffs(agent, run_id))
   write_text(file.path(folder, "signoff-history.json"), verdifax_get_signoff_history(owner))
   cat(sprintf("sign-off %s recorded as sequence %s, hash %s\n", decision, record$sequence, record$signoff_hash))
-  cat(sprintf("verify: verdifax-verify --signoff %s --approver-key approver.txt %s\n", file.path(folder, "signoffs.json"), file.path(folder, record_file)))
+  cat(sprintf("verify: verdifax-verify --signoff %s --approver-key %s %s\n", file.path(folder, "signoffs.json"), approver_file, file.path(folder, record_file)))
   history <- history_check(file.path(folder, "signoff-history.json"))
   cat(sprintf("verify: %s\n%s\n", history[1], history[2]))
 }
@@ -720,6 +813,14 @@ publication_targets <- function(job_id, receipt) {
   list(folder = folder, targets = summary$run_ids)
 }
 
+# The records a publish or unpublish acts on, sorted: every target but a
+# deleted step, which has no record left; its tombstone stands in its place in
+# the feed (R250).
+publishable <- function(folder, targets) {
+  kept <- names(targets)[!file.exists(file.path(folder, "steps", paste0(names(targets), DELETED_STEP_SUFFIX)))]
+  sort(kept, method = "radix")
+}
+
 cmd_publication <- function(job_id, receipt, publish) {
   keys <- load_keys()
   owner <- client_for(keys$owner)
@@ -729,7 +830,7 @@ cmd_publication <- function(job_id, receipt, publish) {
   earlier_path <- file.path(where$folder, "published.json")
   earlier <- if (file.exists(earlier_path)) jsonlite::fromJSON(earlier_path, simplifyVector = FALSE) else list()
   published <- list()
-  for (name in sort(names(where$targets))) {
+  for (name in publishable(where$folder, where$targets)) {
     run_id <- as.integer(where$targets[[name]])
     answer <- if (publish) verdifax_publish_run(owner, run_id) else verdifax_unpublish_run(owner, run_id)
     # A completed run is served at its bundle address, a stopped run at its
@@ -769,7 +870,13 @@ print_verify_commands <- function(job_id) {
   cat(sprintf("verify with verdifax-verify %s or later:\n", MIN_VERIFIER))
   traces <- if (dir.exists(file.path(folder, TRACES_FOLDER))) paste0(" --aivp-traces ", file.path(folder, TRACES_FOLDER)) else ""
   cat(sprintf("  verdifax-verify --job %s%s\n", file.path(folder, "steps"), traces))
-  cat(sprintf("  verdifax-verify --account-policy %s %s\n", file.path(REPO, "policy", POLICY_FILE), file.path(folder, "steps", "verdict.json")))
+  if (file.exists(file.path(folder, "signoffs.json"))) {
+    cat(sprintf("  verdifax-verify --account-policy %s --signoff %s --approver-key approver.txt %s\n", file.path(REPO, "policy", POLICY_FILE),
+                file.path(folder, "signoffs.json"), file.path(folder, "steps", "verdict.json")))
+  } else {
+    cat(sprintf("  verdifax-verify --account-policy %s %s\n", file.path(REPO, "policy", POLICY_FILE), file.path(folder, "steps", "verdict.json")))
+    cat(paste0("  ", SIGNOFF_PENDING_REASON, "\n"))
+  }
   if (file.exists(file.path(folder, "signoffs.json"))) {
     cat(sprintf("  verdifax-verify --signoff %s --approver-key approver.txt %s\n", file.path(folder, "signoffs.json"), file.path(folder, "steps", "verdict.json")))
   }
@@ -783,6 +890,129 @@ print_verify_commands <- function(job_id) {
   }
 }
 
+# ── the account: approvers, settings, keys, deletion, webhooks ─────────────
+# Each change is made with the owner key (the agent key for its own request
+# key) and sealed by the server in the account's feed, which `feed` saves:
+# the feed is the record of every change, so no command keeps its own.
+
+owner_client <- function() client_for(load_keys()$owner)
+
+# The id the server gave this approver when it was added, kept with its key.
+approver_id <- function(name) {
+  private_path <- approver_files(name)[1]
+  if (!file.exists(private_path)) fail(sprintf("no %s here; run `claims-review approver-add %s` first", private_path, name))
+  as.integer(jsonlite::fromJSON(private_path, simplifyVector = FALSE)$id)
+}
+
+cmd_approver_add <- function(name) {
+  if (!is.null(approver_name_error(name))) fail(approver_name_error(name))
+  files <- approver_files(name)
+  if (file.exists(files[1])) fail(sprintf("%s exists here; this approver is already added", files[1]))
+  owner <- owner_client()
+  approver <- verdifax_generate_request_key()
+  added <- verdifax_register_approver(owner, approver$private_key, paste("Claims review approver", name))
+  write_private(files[1], paste0(canonical(list(private_key = hex(approver$private_key), id = added$id)), "\n"))
+  write_text(files[2], jsonlite::base64_enc(approver$public_key))
+  write_json("approvers.json", verdifax_list_approvers(owner))
+  cat(sprintf("approver %s added; its public key is in %s\n", name, files[2]))
+}
+
+cmd_approver_revoke <- function(name) {
+  if (!is.null(approver_name_error(name))) fail(approver_name_error(name))
+  owner <- owner_client()
+  verdifax_revoke_approver(owner, approver_id(name))
+  write_json("approvers.json", verdifax_list_approvers(owner))
+  cat(sprintf("approver %s revoked; the sign-offs it gave stay as they were\n", name))
+}
+
+cmd_settings <- function(setting, value) {
+  problem <- setting_error(setting, value)
+  if (!is.null(problem)) fail(problem)
+  verdifax_set_account_setting(owner_client(), setting, value)
+  cat(sprintf("%s is %s\n", setting, value))
+}
+
+write_keys <- function(keys) {
+  write_private("demo-keys.json", paste0(as.character(jsonlite::toJSON(keys, auto_unbox = TRUE, pretty = TRUE)), "\n"))
+}
+
+cmd_request_key_rotate <- function() {
+  keys <- load_keys()
+  next_key <- verdifax_generate_request_key()
+  verdifax_rotate_request_key(client_for(keys$agent), next_key$private_key)
+  write_keys(with_agent_signing_key(keys, hex(next_key$private_key)))
+  cat("the agent key's request key was replaced, approved by the key it replaced\n")
+}
+
+cmd_request_key_clear <- function() {
+  keys <- load_keys()
+  verdifax_clear_request_key(client_for(keys$agent))
+  write_keys(with_agent_signing_key(keys, NULL))
+  cat("the agent key's request key was cleared, approved by that key\n")
+}
+
+cmd_key_revoke <- function() {
+  keys <- load_keys()
+  owner <- client_for(keys$owner)
+  verdifax_revoke_account_key(owner, as.integer(keys$agent$id))
+  write_json("account-keys.json", verdifax_list_account_keys(owner))
+  cat(sprintf("agent key %s revoked; the records it sealed stay as they were\n", keys$agent$id))
+}
+
+# A deleted step's record is replaced by its tombstone, which verdifax-verify
+# --job reads in its place (R250).
+replace_with_tombstone <- function(folder, step, tombstone) {
+  write_deleted_steps(folder, stats::setNames(list(tombstone), step))
+  record <- file.path(folder, "steps", paste0(step, ".json"))
+  if (file.exists(record)) file.remove(record)
+  invisible(NULL)
+}
+
+cmd_delete_step <- function(job_id, step) {
+  folder <- file.path("records", job_id)
+  record_path <- file.path(folder, "steps", paste0(step, ".json"))
+  if (!file.exists(record_path)) fail(sprintf("%s does not exist; delete-step needs the step's sealed record", record_path))
+  record <- jsonlite::fromJSON(record_path, simplifyVector = FALSE)
+  verdifax_delete_run(owner_client(), as.integer(record$run_id), record$manifest_hash)
+  tombstone <- deleted_steps(read_account_feed(load_keys()), job_id)[[step]]
+  if (is.null(tombstone)) fail(sprintf("the feed holds no run.deleted event for %s of %s", step, job_id))
+  replace_with_tombstone(folder, step, tombstone)
+  cat(sprintf("step %s of %s deleted; its tombstone is %s\n", step, job_id, file.path(folder, "steps", paste0(step, DELETED_STEP_SUFFIX))))
+  cat(sprintf("verify: verdifax-verify --job %s\n", file.path(folder, "steps")))
+}
+
+cmd_webhook_subscribe <- function(url) {
+  hook <- verdifax_create_webhook(owner_client(), url)
+  write_private("webhook.json", paste0(as.character(jsonlite::toJSON(hook, auto_unbox = TRUE, pretty = TRUE, null = "null")), "\n"))
+  cat(sprintf("webhook %s subscribed to every kind of event at %s; its secret is in webhook.json\n", hook$id, url))
+}
+
+# Removes the subscription webhook-subscribe made, as the owner, sealed in the
+# feed as webhook.deleted. webhook.json is kept: its secret can be published
+# once the subscription is gone, since it then signs nothing.
+cmd_webhook_remove <- function() {
+  if (!file.exists("webhook.json")) fail("no webhook.json here; run `claims-review webhook-subscribe URL` first")
+  id <- as.integer(jsonlite::fromJSON("webhook.json", simplifyVector = FALSE)$id)
+  write_json("webhook-removed.json", verdifax_delete_webhook(owner_client(), id))
+  cat(sprintf("webhook %s removed; its removal is sealed in the account's feed\n", id))
+}
+
+# The lists alone, the same shape in every language: webhooks.json the
+# account's webhooks, webhook-deliveries.json each one's deliveries by id.
+cmd_webhook_list <- function() {
+  owner <- owner_client()
+  hooks <- verdifax_list_webhooks(owner)$webhooks
+  if (is.null(hooks)) hooks <- list()
+  write_json("webhooks.json", hooks)
+  deliveries <- empty_object()
+  for (h in hooks) {
+    got <- verdifax_list_webhook_deliveries(owner, as.integer(h$id), limit = 500)$deliveries
+    deliveries[[as.character(h$id)]] <- if (is.null(got)) list() else got
+  }
+  write_json("webhook-deliveries.json", deliveries)
+  cat(sprintf("%d webhook(s); their deliveries are in webhook-deliveries.json\n", length(hooks)))
+}
+
 # ── main ───────────────────────────────────────────────────────────────────
 
 take_option <- function(args, name) {
@@ -794,25 +1024,28 @@ take_option <- function(args, name) {
 
 main <- function() {
   args <- commandArgs(trailingOnly = TRUE)
-  if (length(args) == 0) fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, feed, verify-commands JOB_ID")
+  if (length(args) == 0) fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-rotate, request-key-clear, key-revoke, delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID")
   command <- args[1]
   args <- args[-1]
   if (command == "setup") return(cmd_setup())
   if (command == "review") {
     model <- take_option(args, "--model"); args <- model$args
     answers <- take_option(args, "--answers"); args <- answers$args
+    without_actor <- "--without-actor" %in% args
+    args <- args[args != "--without-actor"]
     if (length(args) != 1) fail("review takes one draft file")
-    return(cmd_review(args[1], if (is.null(model$value)) DEFAULT_MODEL else model$value, answers$value))
+    return(cmd_review(args[1], if (is.null(model$value)) DEFAULT_MODEL else model$value, answers$value, without_actor))
   }
   if (command == "sign-off") {
     note <- take_option(args, "--note"); args <- note$args
     receipt <- take_option(args, "--receipt"); args <- receipt$args
+    approver <- take_option(args, "--approver"); args <- approver$args
     if (length(args) == 0) fail("sign-off needs approve or reject")
     decision <- args[length(args)]
     job_id <- if (length(args) > 1) args[1] else NULL
     if (!decision %in% c("approve", "reject")) fail("sign-off needs approve or reject")
     if (is.null(receipt$value) && is.null(job_id)) fail("sign-off needs a JOB_ID, or --receipt RUN_ID")
-    return(cmd_sign_off(job_id, decision, note$value, receipt$value))
+    return(cmd_sign_off(job_id, decision, note$value, receipt$value, approver$value))
   }
   if (command %in% c("publish", "unpublish")) {
     receipt <- take_option(args, "--receipt"); args <- receipt$args
@@ -820,12 +1053,33 @@ main <- function() {
     if (is.null(receipt$value) && is.null(job_id)) fail(paste(command, "needs a JOB_ID, or --receipt RUN_ID"))
     return(cmd_publication(job_id, receipt$value, command == "publish"))
   }
+  if (command %in% c("approver-add", "approver-revoke")) {
+    if (length(args) != 1) fail(paste(command, "takes a NAME"))
+    return(if (command == "approver-add") cmd_approver_add(args[1]) else cmd_approver_revoke(args[1]))
+  }
+  if (command == "settings") {
+    if (length(args) != 2) fail("settings takes a SETTING and a VALUE")
+    return(cmd_settings(args[1], args[2]))
+  }
+  if (command == "request-key-rotate") return(cmd_request_key_rotate())
+  if (command == "request-key-clear") return(cmd_request_key_clear())
+  if (command == "key-revoke") return(cmd_key_revoke())
+  if (command == "delete-step") {
+    if (length(args) != 2) fail("delete-step takes a JOB_ID and a STEP")
+    return(cmd_delete_step(args[1], args[2]))
+  }
+  if (command == "webhook-subscribe") {
+    if (length(args) != 1) fail("webhook-subscribe takes a URL")
+    return(cmd_webhook_subscribe(args[1]))
+  }
+  if (command == "webhook-list") return(cmd_webhook_list())
+  if (command == "webhook-remove") return(cmd_webhook_remove())
   if (command == "feed") return(cmd_feed())
   if (command == "verify-commands") {
     if (length(args) != 1) fail("verify-commands takes a JOB_ID")
     return(print_verify_commands(args[1]))
   }
-  fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, feed, verify-commands JOB_ID")
+  fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-rotate, request-key-clear, key-revoke, delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID")
 }
 
 if (!nzchar(Sys.getenv("CLAIMS_REVIEW_NO_MAIN"))) main()

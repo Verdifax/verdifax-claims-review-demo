@@ -16,17 +16,26 @@ Commands (the same in every language of this repository):
 
   claims-review setup                              owner key in VERDIFAX_OWNER_KEY
   claims-review review DRAFT.md [--model ID]        model key in ANTHROPIC_API_KEY
-  claims-review sign-off JOB_ID approve|reject [--note TEXT]
-  claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT]
+  claims-review review DRAFT.md --without-actor     the gate step names no agent
+  claims-review sign-off JOB_ID approve|reject [--note TEXT] [--approver NAME]
+  claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT] [--approver NAME]
   claims-review publish JOB_ID | publish --receipt RUN_ID
   claims-review unpublish JOB_ID | unpublish --receipt RUN_ID
+  claims-review approver-add NAME | approver-revoke NAME
+  claims-review settings owner-replacement|verdifax-deletion allowed|blocked
+  claims-review request-key-rotate | request-key-clear      the agent key's request key
+  claims-review key-revoke                                  the owner revokes the agent key
+  claims-review delete-step JOB_ID STEP                     the owner deletes one step
+  claims-review webhook-subscribe URL | webhook-list | webhook-remove
   claims-review feed
   claims-review verify-commands JOB_ID
 
 Environment: VERDIFAX_BASE_URL (default https://api.verdifax.com).
 Files, in the working folder: demo-keys.json and approver-key.json (0600),
 approver.txt, account-history.json, records/<job_id>/*.json with payloads/,
-signals.json.
+signals.json; approver-<name>-key.json (0600), approver-<name>.txt and
+approvers.json; account-keys.json; webhook.json (0600),
+webhooks.json and webhook-deliveries.json.
 """
 
 from __future__ import annotations
@@ -75,9 +84,23 @@ ANSWERS_FOLDER = "answers"
 # The text the server's AI review checked for each step, as the server
 # returned it once: a reader re-runs the review's check from these files.
 TRACES_FOLDER = "traces"
-# The account policy setup activates; v1 and v2 stay for records sealed
-# under them. v3 requires a reviewed AI answer on every step after the gate.
-POLICY_FILE = "claims-review-v3.json"
+# The account policy setup activates; v1 to v3 stay for records sealed
+# under them. v3 requires a reviewed AI answer on every step after the gate;
+# v4 adds that every step names its agent (required_attested_fields), that
+# each verdict needs a person's sign-off, and that every step after the gate
+# passes its declared data checks.
+POLICY_FILE = "claims-review-v4.json"
+# The rule set's pinned hash, which the rule_set_pinned data check compares.
+RULE_SET_SHA256 = "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98ae7"
+# The data checks every step declares in policy_context.data_quality, each
+# computed: draft_unchanged (the draft re-read before the step has the hash
+# sealed at intake) and rule_set_pinned (the rule set's hash is the pin).
+DATA_QUALITY_CHECKS = ("draft_unchanged", "rule_set_pinned")
+DATA_QUALITY_SOURCE = "claims-review draft and rule set"
+# The owner's two blocks on Verdifax, and their values.
+ACCOUNT_SETTINGS = ("owner-replacement", "verdifax-deletion")
+SETTING_VALUES = ("allowed", "blocked")
+APPROVER_NAME = re.compile(r"^[a-z0-9-]{1,40}$")
 # The AI's work on the steps after the gate: listing the draft's claims,
 # and explaining the verdict code decided.
 CLAIMS_PROMPT = "claims-prompt-v1.txt"
@@ -90,6 +113,9 @@ DELETED_STEP_SUFFIX = ".deleted.json"
 # every printed re-check states the limit on its head statement's age (R246).
 SAVED_HEAD_MAX_AGE = "168h"
 HISTORY_AGE_REASON = "(168h: a saved history is checked as of when it was fetched; raise the limit for an older copy, or run sign-off again to fetch it fresh)"
+# Printed under the account-policy check of a verdict with no sign-off yet:
+# policy v4 requires one, so the verifier exits 4 until it is given.
+SIGNOFF_PENDING_REASON = "(exit 4, ANCHORED, SIGN-OFF NOT SHOWN, until a sign-off is given: the policy requires one on the verdict; run sign-off, then verify-commands again)"
 FEED_AGE_REASON = "(168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh)"
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -167,8 +193,58 @@ def load_keys() -> dict[str, Any]:
 
 
 def client_for(key: dict[str, Any]) -> verdifax.VerdifaxClient:
-    return verdifax.VerdifaxClient(base_url=base_url(), api_key=key["secret"],
-                                   signing_key=bytes.fromhex(key["signing_key"]))
+    """A client for a key; one whose request key was cleared sends unsigned."""
+    signing = bytes.fromhex(key["signing_key"]) if key.get("signing_key") else None
+    return verdifax.VerdifaxClient(base_url=base_url(), api_key=key["secret"], signing_key=signing)
+
+
+def usage_substance(usage: Optional[dict[str, int]]) -> Optional[dict[str, Any]]:
+    """The request_substance a step declares: the model's own usage report for
+    the step's model call, so the server's budgets count real tokens. The gate
+    step calls no model and declares none (None)."""
+    if usage is None:
+        return None
+    return {"cost": {"input_tokens": usage["input_tokens"], "output_tokens": usage["output_tokens"],
+                     "total_tokens": usage["input_tokens"] + usage["output_tokens"]}}
+
+
+def data_quality(intake_draft_sha256: str, draft_sha256_now: str, rule_set_hash: str, as_of: str) -> dict[str, Any]:
+    """The data checks a step declares, each computed (round 62)."""
+    def result(ok: bool) -> str:
+        return "pass" if ok else "fail"
+    return {"source": DATA_QUALITY_SOURCE, "as_of": as_of, "checks": [
+        {"name": DATA_QUALITY_CHECKS[0], "result": result(draft_sha256_now == intake_draft_sha256)},
+        {"name": DATA_QUALITY_CHECKS[1], "result": result(rule_set_hash == RULE_SET_SHA256)}]}
+
+
+def setting_error(setting: str, value: str) -> Optional[str]:
+    """Why a settings command is refused before anything is sent, or None."""
+    if setting not in ACCOUNT_SETTINGS:
+        return "the setting must be %s, not %s" % (" or ".join(ACCOUNT_SETTINGS), setting)
+    if value not in SETTING_VALUES:
+        return "the value must be %s, not %s" % (" or ".join(SETTING_VALUES), value)
+    return None
+
+
+def approver_name_error(name: str) -> Optional[str]:
+    if not APPROVER_NAME.match(name):
+        return "an approver name is 1 to 40 lowercase letters, digits or dashes"
+    return None
+
+
+def approver_files(name: str) -> tuple[Path, Path]:
+    """A named approver's private key file (0600) and public key file."""
+    return Path("approver-%s-key.json" % name), Path("approver-%s.txt" % name)
+
+
+
+def with_agent_signing_key(keys: dict[str, Any], signing_key_hex: Optional[str]) -> dict[str, Any]:
+    """The keys file with the agent key's request key replaced, or removed
+    when it was cleared."""
+    agent = {k: v for k, v in keys["agent"].items() if k != "signing_key"}
+    if signing_key_hex is not None:
+        agent["signing_key"] = signing_key_hex
+    return dict(keys, agent=agent)
 
 
 # ── setup ──────────────────────────────────────────────────────────────────
@@ -309,6 +385,15 @@ def cmd_review(args: argparse.Namespace) -> None:
     draft_path = Path(args.draft)
     draft = read_input(draft_path)
     draft_hash = sha256_hex(draft.encode("utf-8"))
+    # The time the draft was read: the as_of of every step's data checks.
+    read_at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def context(step: str) -> dict[str, Any]:
+        """The step's policy context: its object, the draft's classification
+        and the data checks, computed again now, the draft re-read."""
+        now_hash = sha256_hex(read_input(draft_path).encode("utf-8"))
+        return {"object_type": "text", "object_id": OBJECT_PREFIX + step, "classification": level,
+                "data_quality": data_quality(draft_hash, now_hash, rule_set_hash, read_at)}
     level = draft_classification(draft)
     answers = Answers(args.answers)
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -320,9 +405,13 @@ def cmd_review(args: argparse.Namespace) -> None:
                       "rule_set": RULE_SET, "rule_set_hash": rule_set_hash, "classification": level}
     try:
         job = agent.job(job_id)
+        # The gate step names its agent, as policy v4 requires of every step;
+        # --without-actor leaves the name out on purpose, so the policy
+        # refuses the draft here, before any model is called.
+        agent_named = None if args.without_actor else verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID)
         intake = job.step("intake", after=[], payload=canonical(intake_payload), program_id=PROGRAM_ID, route_id=ROUTE_INTAKE,
-                          registry_record_hash=REGISTRY_RECORD_HASH,
-                          policy_context={"object_type": "text", "object_id": OBJECT_PREFIX + "intake", "classification": level})
+                          registry_record_hash=REGISTRY_RECORD_HASH, attested_context=agent_named,
+                          policy_context=context("intake"))
     except APIError as exc:
         # The account policy refused the draft at intake (for example a
         # confidential draft), so it never reached a model. The refusal is
@@ -359,11 +448,12 @@ def cmd_review(args: argparse.Namespace) -> None:
     try:
         claims_step = job.step("claims", after=["intake"], payload=canonical(claims_payload), program_id=PROGRAM_ID,
                                route_id=ROUTE_CLAIMS, registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer_texts["claims"],
+                               request_substance=usage_substance(listed),
                                attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
                                                                          model_name=listed["model"], prompt_hash=claims_prompt_hash,
                                                                          decision_kind="claims.list",
                                                                          decision_result=str(len(listed["claims"]))),
-                               policy_context={"object_type": "text", "object_id": OBJECT_PREFIX + "claims", "classification": level})
+                               policy_context=context("claims"))
     except APIError as exc:
         payloads["claims"] = claims_payload
         if exc.aivp_trace_text:
@@ -391,10 +481,11 @@ def cmd_review(args: argparse.Namespace) -> None:
         try:
             receipt = job.step(rule["id"], after=["claims"], payload=canonical(payload), program_id=PROGRAM_ID, route_id=ROUTE_RULE,
                                registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer_texts[rule["id"]],
+                               request_substance=usage_substance(answer),
                                attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
                                                                          model_name=answer["model"], prompt_hash=prompt_hash,
                                                                          decision_kind="claims.rule_check", decision_result=answer["verdict"]),
-                               policy_context={"object_type": "text", "object_id": OBJECT_PREFIX + rule["id"], "classification": level})
+                               policy_context=context(rule["id"]))
         except APIError as exc:
             # The account policy, the server's content screen or its review
             # of the model's answer stopped this step, so the job stops here:
@@ -433,10 +524,11 @@ def cmd_review(args: argparse.Namespace) -> None:
     try:
         final = job.step("verdict", after=[r["id"] for r in rules], final=True, payload=canonical(verdict_payload), program_id=PROGRAM_ID,
                          route_id=ROUTE_VERDICT, registry_record_hash=REGISTRY_RECORD_HASH, ai_output_text=answer_texts["verdict"],
+                         request_substance=usage_substance(explained),
                          attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
                                                                    model_name=explained["model"], prompt_hash=verdict_prompt_hash,
                                                                    decision_kind="claims.verdict", decision_result=verdict),
-                         policy_context={"object_type": "text", "object_id": OBJECT_PREFIX + "verdict", "classification": level})
+                         policy_context=context("verdict"))
     except APIError as exc:
         payloads["verdict"] = verdict_payload
         if exc.aivp_trace_text:
@@ -639,10 +731,11 @@ def feed_check() -> tuple[str, str]:
 
 # ── sign-off ───────────────────────────────────────────────────────────────
 
-def approver_private_key() -> bytes:
-    path = Path("approver-key.json")
+def approver_private_key(name: Optional[str] = None) -> bytes:
+    """The first approver's private key, or a named approver's."""
+    path = approver_files(name)[0] if name else Path("approver-key.json")
     if not path.exists():
-        fail("no approver-key.json here; run `claims-review setup` first")
+        fail("no %s here; run `claims-review %s` first" % (path, "approver-add " + name if name else "setup"))
     return bytes.fromhex(json.loads(path.read_text(encoding="utf-8"))["private_key"])
 
 
@@ -650,7 +743,10 @@ def cmd_sign_off(args: argparse.Namespace) -> None:
     keys = load_keys()
     agent = client_for(keys["agent"])
     owner = client_for(keys["owner"])
-    key = approver_private_key()
+    if args.approver and approver_name_error(args.approver):
+        fail(approver_name_error(args.approver))
+    key = approver_private_key(args.approver)
+    approver_file = approver_files(args.approver)[1] if args.approver else Path("approver.txt")
     if args.receipt:
         run_id = int(args.receipt)
         target = {"kind": "receipt", "run_id": run_id, "digest": stop_receipt_hash(agent, run_id)}
@@ -665,14 +761,139 @@ def cmd_sign_off(args: argparse.Namespace) -> None:
     write_json(folder / "signoffs.json", agent.get_signoffs(run_id))
     write_json(folder / "signoff-history.json", owner.get_signoff_history())
     print("sign-off %s recorded as sequence %s, hash %s" % (args.decision, record["sequence"], record["signoff_hash"]))
-    print("verify: verdifax-verify --signoff %s --approver-key approver.txt %s" % (folder / "signoffs.json",
+    print("verify: verdifax-verify --signoff %s --approver-key %s %s" % (folder / "signoffs.json", approver_file,
           folder / "receipt.json" if args.receipt else folder / "steps" / "verdict.json"))
     history, history_reason = history_check(folder / "signoff-history.json")
     print("verify: " + history)
     print(history_reason)
 
 
+# ── the account: approvers, settings, keys, deletion, webhooks ─────────────
+# Each change is made with the owner key (the agent key for its own request
+# key) and sealed by the server in the account's feed, which `feed` saves:
+# the feed is the record of every change, so no command keeps its own.
+
+def owner_client() -> verdifax.VerdifaxClient:
+    return client_for(load_keys()["owner"])
+
+
+def approver_id(name: str) -> int:
+    """The id the server gave this approver when it was added, kept with its key."""
+    private = approver_files(name)[0]
+    if not private.exists():
+        fail("no %s here; run `claims-review approver-add %s` first" % (private, name))
+    return int(json.loads(private.read_text(encoding="utf-8"))["id"])
+
+
+def cmd_approver_add(args: argparse.Namespace) -> None:
+    if approver_name_error(args.name):
+        fail(approver_name_error(args.name))
+    private, public = approver_files(args.name)
+    if private.exists():
+        fail("%s exists here; this approver is already added" % private)
+    owner = owner_client()
+    approver = verdifax.generate_request_key()
+    answer = owner.register_approver("Claims review approver %s" % args.name, approver.private_key)
+    write_private(private, json.dumps({"private_key": approver.private_key.hex(), "id": answer["id"]}) + "\n")
+    public.write_text(base64.b64encode(approver.public_key).decode("ascii"), encoding="utf-8")
+    write_json(Path("approvers.json"), owner.list_approvers())
+    print("approver %s added; its public key is in %s" % (args.name, public))
+
+
+def cmd_approver_revoke(args: argparse.Namespace) -> None:
+    if approver_name_error(args.name):
+        fail(approver_name_error(args.name))
+    owner = owner_client()
+    owner.revoke_approver(approver_id(args.name))
+    write_json(Path("approvers.json"), owner.list_approvers())
+    print("approver %s revoked; the sign-offs it gave stay as they were" % args.name)
+
+
+def cmd_settings(args: argparse.Namespace) -> None:
+    if setting_error(args.setting, args.value):
+        fail(setting_error(args.setting, args.value))
+    owner_client().set_account_setting(args.setting, args.value)
+    print("%s is %s" % (args.setting, args.value))
+
+
+def cmd_request_key_rotate(_: argparse.Namespace) -> None:
+    keys = load_keys()
+    agent = client_for(keys["agent"])
+    new = verdifax.generate_request_key()
+    agent.rotate_request_key(new.private_key)
+    write_private(keys_path(), json.dumps(with_agent_signing_key(keys, new.private_key.hex()), indent=2) + "\n")
+    print("the agent key's request key was replaced, approved by the key it replaced")
+
+
+def cmd_request_key_clear(_: argparse.Namespace) -> None:
+    keys = load_keys()
+    client_for(keys["agent"]).clear_request_key()
+    write_private(keys_path(), json.dumps(with_agent_signing_key(keys, None), indent=2) + "\n")
+    print("the agent key's request key was cleared, approved by that key")
+
+
+def cmd_key_revoke(_: argparse.Namespace) -> None:
+    keys = load_keys()
+    owner = client_for(keys["owner"])
+    owner.revoke_account_key(int(keys["agent"]["id"]))
+    write_json(Path("account-keys.json"), owner.list_account_keys())
+    print("agent key %s revoked; the records it sealed stay as they were" % keys["agent"]["id"])
+
+
+def replace_with_tombstone(folder: Path, step: str, tombstone: dict[str, Any]) -> None:
+    """A deleted step's record is replaced by its tombstone, which
+    verdifax-verify --job reads in its place (R250)."""
+    write_deleted_steps(folder, {step: tombstone})
+    record = folder / "steps" / ("%s.json" % step)
+    if record.exists():
+        record.unlink()
+
+
+def cmd_delete_step(args: argparse.Namespace) -> None:
+    folder = Path("records") / args.job_id
+    record_path = folder / "steps" / ("%s.json" % args.step)
+    if not record_path.exists():
+        fail("%s does not exist; delete-step needs the step's sealed record" % record_path)
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    owner_client().delete_run(int(record["run_id"]), record["manifest_hash"])
+    tombstone = deleted_steps(read_account_feed(load_keys()), args.job_id).get(args.step)
+    if tombstone is None:
+        fail("the feed holds no run.deleted event for %s of %s" % (args.step, args.job_id))
+    replace_with_tombstone(folder, args.step, tombstone)
+    print("step %s of %s deleted; its tombstone is %s" % (args.step, args.job_id, folder / "steps" / (args.step + DELETED_STEP_SUFFIX)))
+    print("verify: verdifax-verify --job %s" % (folder / "steps"))
+
+
+def cmd_webhook_subscribe(args: argparse.Namespace) -> None:
+    hook = owner_client().create_webhook(args.url)
+    write_private(Path("webhook.json"), json.dumps(hook, indent=2) + "\n")
+    print("webhook %s subscribed to every kind of event at %s; its secret is in webhook.json" % (hook["id"], args.url))
+
+
+def cmd_webhook_list(_: argparse.Namespace) -> None:
+    # The lists alone, the same shape in every language: webhooks.json the
+    # account's webhooks, webhook-deliveries.json each one's deliveries by id.
+    owner = owner_client()
+    hooks = owner.list_webhooks().get("webhooks") or []
+    write_json(Path("webhooks.json"), hooks)
+    deliveries = {str(h["id"]): owner.list_webhook_deliveries(int(h["id"]), limit=500).get("deliveries") or [] for h in hooks}
+    write_json(Path("webhook-deliveries.json"), deliveries)
+    print("%d webhook(s); their deliveries are in webhook-deliveries.json" % len(hooks))
+
+
 # ── feed ───────────────────────────────────────────────────────────────────
+
+def cmd_webhook_remove(_: argparse.Namespace) -> None:
+    """Removes the subscription webhook-subscribe made, as the owner, sealed in
+    the feed as webhook.deleted. webhook.json is kept: its secret can be
+    published once the subscription is gone, since it then signs nothing."""
+    path = Path("webhook.json")
+    if not path.exists():
+        fail("no webhook.json here; run `claims-review webhook-subscribe URL` first")
+    hook_id = int(json.loads(path.read_text(encoding="utf-8"))["id"])
+    write_json(Path("webhook-removed.json"), owner_client().delete_webhook(hook_id))
+    print("webhook %d removed; its removal is sealed in the account's feed" % hook_id)
+
 
 # ── publish ────────────────────────────────────────────────────────────────
 # The account's owner key makes a record public on its random link, or
@@ -693,6 +914,13 @@ def publication_targets(job_id: Optional[str], receipt: Optional[str]) -> tuple[
     return folder, dict(summary["run_ids"])
 
 
+def publishable(folder: Path, targets: dict[str, int]) -> list[str]:
+    """The records a publish or unpublish acts on, sorted: every target but a
+    deleted step, which has no record left; its tombstone stands in its place
+    in the feed (R250)."""
+    return sorted(n for n in targets if not (folder / "steps" / ("%s%s" % (n, DELETED_STEP_SUFFIX))).exists())
+
+
 def publication(args: argparse.Namespace, publish: bool) -> None:
     keys = load_keys()
     owner = client_for(keys["owner"])
@@ -701,7 +929,7 @@ def publication(args: argparse.Namespace, publish: bool) -> None:
     # publication, so the sealed publication saved earlier is kept.
     earlier = json.loads((folder / "published.json").read_text(encoding="utf-8")) if (folder / "published.json").exists() else {}
     published: dict[str, Any] = {}
-    for name in sorted(targets):
+    for name in publishable(folder, targets):
         run_id = targets[name]
         answer = owner.publish_run(run_id) if publish else owner.unpublish_run(run_id)
         # A completed run is served at its bundle address, a stopped run at
@@ -749,7 +977,12 @@ def print_verify_commands(job_id: str) -> None:
     print("verify with verdifax-verify %s or later:" % MIN_VERIFIER)
     traces = " --aivp-traces %s" % (folder / TRACES_FOLDER) if (folder / TRACES_FOLDER).is_dir() else ""
     print("  verdifax-verify --job %s%s" % (folder / "steps", traces))
-    print("  verdifax-verify --account-policy %s %s" % (REPO / "policy" / POLICY_FILE, folder / "steps" / "verdict.json"))
+    if (folder / "signoffs.json").exists():
+        print("  verdifax-verify --account-policy %s --signoff %s --approver-key approver.txt %s"
+              % (REPO / "policy" / POLICY_FILE, folder / "signoffs.json", folder / "steps" / "verdict.json"))
+    else:
+        print("  verdifax-verify --account-policy %s %s" % (REPO / "policy" / POLICY_FILE, folder / "steps" / "verdict.json"))
+        print("  " + SIGNOFF_PENDING_REASON)
     if (folder / "signoffs.json").exists():
         print("  verdifax-verify --signoff %s --approver-key approver.txt %s" % (folder / "signoffs.json", folder / "steps" / "verdict.json"))
     if (folder / "signoff-history.json").exists():
@@ -774,18 +1007,40 @@ def main(argv: Optional[list[str]] = None) -> None:
     review.add_argument("draft")
     review.add_argument("--model", default=DEFAULT_MODEL)
     review.add_argument("--answers", help="recorded answers for tests against a local server")
+    review.add_argument("--without-actor", action="store_true", help="send the gate step with no agent name, so policy v4 refuses it")
     review.set_defaults(fn=cmd_review)
     sign = sub.add_parser("sign-off")
     sign.add_argument("job_id", nargs="?")
     sign.add_argument("decision", choices=("approve", "reject"))
     sign.add_argument("--note")
     sign.add_argument("--receipt", help="sign off a stopped step's receipt by run id")
+    sign.add_argument("--approver", help="sign with an approver added by approver-add, not the first")
     sign.set_defaults(fn=cmd_sign_off)
     for name, fn in (("publish", cmd_publish), ("unpublish", cmd_unpublish)):
         pub = sub.add_parser(name)
         pub.add_argument("job_id", nargs="?")
         pub.add_argument("--receipt", help="act on a stopped step's receipt, and the steps sealed before it, by run id")
         pub.set_defaults(fn=fn)
+    for name, fn in (("approver-add", cmd_approver_add), ("approver-revoke", cmd_approver_revoke)):
+        cmd = sub.add_parser(name)
+        cmd.add_argument("name")
+        cmd.set_defaults(fn=fn)
+    settings = sub.add_parser("settings")
+    settings.add_argument("setting")
+    settings.add_argument("value")
+    settings.set_defaults(fn=cmd_settings)
+    sub.add_parser("request-key-rotate").set_defaults(fn=cmd_request_key_rotate)
+    sub.add_parser("request-key-clear").set_defaults(fn=cmd_request_key_clear)
+    sub.add_parser("key-revoke").set_defaults(fn=cmd_key_revoke)
+    delete = sub.add_parser("delete-step")
+    delete.add_argument("job_id")
+    delete.add_argument("step")
+    delete.set_defaults(fn=cmd_delete_step)
+    hook = sub.add_parser("webhook-subscribe")
+    hook.add_argument("url")
+    hook.set_defaults(fn=cmd_webhook_subscribe)
+    sub.add_parser("webhook-list").set_defaults(fn=cmd_webhook_list)
+    sub.add_parser("webhook-remove").set_defaults(fn=cmd_webhook_remove)
     sub.add_parser("feed").set_defaults(fn=cmd_feed)
     verify = sub.add_parser("verify-commands")
     verify.add_argument("job_id")

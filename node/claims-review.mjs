@@ -17,20 +17,29 @@
 //
 //   claims-review setup                              owner key in VERDIFAX_OWNER_KEY
 //   claims-review review DRAFT.md [--model ID]        model key in ANTHROPIC_API_KEY
-//   claims-review sign-off JOB_ID approve|reject [--note TEXT]
-//   claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT]
+//   claims-review review DRAFT.md --without-actor     the gate step names no agent
+//   claims-review sign-off JOB_ID approve|reject [--note TEXT] [--approver NAME]
+//   claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT] [--approver NAME]
 //   claims-review publish JOB_ID | publish --receipt RUN_ID
 //   claims-review unpublish JOB_ID | unpublish --receipt RUN_ID
+//   claims-review approver-add NAME | approver-revoke NAME
+//   claims-review settings owner-replacement|verdifax-deletion allowed|blocked
+//   claims-review request-key-rotate | request-key-clear      the agent key's request key
+//   claims-review key-revoke                                  the owner revokes the agent key
+//   claims-review delete-step JOB_ID STEP                     the owner deletes one step
+//   claims-review webhook-subscribe URL | webhook-list | webhook-remove
 //   claims-review feed
 //   claims-review verify-commands JOB_ID
 //
 // Environment: VERDIFAX_BASE_URL (default https://api.verdifax.com).
 // Files, in the working folder: demo-keys.json and approver-key.json (0600),
 // approver.txt, account-history.json, records/<job_id>/*.json with payloads/,
-// signals.json.
+// signals.json; approver-<name>-key.json (0600), approver-<name>.txt and
+// approvers.json; account-keys.json; webhook.json (0600), webhooks.json and
+// webhook-deliveries.json.
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { APIError, VerdifaxClient, generateRequestKeyPair } from "verdifax";
@@ -64,8 +73,23 @@ const ANSWERS_FOLDER = "answers";
 // The text the server's AI review checked for each step, as the server
 // returned it once: a reader re-runs the review's check from these files.
 const TRACES_FOLDER = "traces";
-// The account policy setup activates; v1 stays for records sealed under it.
-const POLICY_FILE = "claims-review-v3.json";
+// The account policy setup activates; v1 to v3 stay for records sealed
+// under them. v3 requires a reviewed AI answer on every step after the gate;
+// v4 adds that every step names its agent (required_attested_fields), that
+// each verdict needs a person's sign-off, and that every step after the gate
+// passes its declared data checks.
+const POLICY_FILE = "claims-review-v4.json";
+// The rule set's pinned hash, which the rule_set_pinned data check compares.
+const RULE_SET_SHA256 = "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98ae7";
+// The data checks every step declares in policy_context.data_quality, each
+// computed: draft_unchanged (the draft re-read before the step has the hash
+// sealed at intake) and rule_set_pinned (the rule set's hash is the pin).
+const DATA_QUALITY_CHECKS = ["draft_unchanged", "rule_set_pinned"];
+const DATA_QUALITY_SOURCE = "claims-review draft and rule set";
+// The owner's two blocks on Verdifax, and their values.
+const ACCOUNT_SETTINGS = ["owner-replacement", "verdifax-deletion"];
+const SETTING_VALUES = ["allowed", "blocked"];
+const APPROVER_NAME = /^[a-z0-9-]{1,40}$/;
 // The AI's work on the steps after the gate: listing the draft's claims, and
 // explaining the verdict code decided.
 const CLAIMS_PROMPT = "claims-prompt-v1.txt";
@@ -78,6 +102,9 @@ const DELETED_STEP_SUFFIX = ".deleted.json";
 // every printed re-check states the limit on its head statement's age (R246).
 const SAVED_HEAD_MAX_AGE = "168h";
 const HISTORY_AGE_REASON = "(168h: a saved history is checked as of when it was fetched; raise the limit for an older copy, or run sign-off again to fetch it fresh)";
+// Printed under the account-policy check of a verdict with no sign-off yet:
+// policy v4 requires one, so the verifier exits 4 until it is given.
+const SIGNOFF_PENDING_REASON = "(exit 4, ANCHORED, SIGN-OFF NOT SHOWN, until a sign-off is given: the policy requires one on the verdict; run sign-off, then verify-commands again)";
 const FEED_AGE_REASON = "(168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh)";
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -152,8 +179,53 @@ function loadKeys() {
   return JSON.parse(readFileSync("demo-keys.json", "utf8"));
 }
 
+// A client for a key; one whose request key was cleared sends unsigned.
 const clientFor = (key) =>
-  new VerdifaxClient({ baseURL: baseURL(), apiKey: key.secret, signingKey: Buffer.from(key.signing_key, "hex") });
+  new VerdifaxClient({
+    baseURL: baseURL(), apiKey: key.secret, ...(key.signing_key ? { signingKey: Buffer.from(key.signing_key, "hex") } : {}),
+  });
+
+// The request_substance a step declares: the model's own usage report for the
+// step's model call, so the server's budgets count real tokens. The gate step
+// calls no model and declares none (null).
+function usageSubstance(usage) {
+  if (usage === null || usage === undefined) return null;
+  return {
+    cost: { input_tokens: usage.input_tokens, output_tokens: usage.output_tokens, total_tokens: usage.input_tokens + usage.output_tokens },
+  };
+}
+
+// The data checks a step declares, each computed (round 62).
+function dataQuality(intakeDraftSha256, draftSha256Now, ruleSetHash, asOf) {
+  const result = (ok) => (ok ? "pass" : "fail");
+  return {
+    source: DATA_QUALITY_SOURCE, as_of: asOf, checks: [
+      { name: DATA_QUALITY_CHECKS[0], result: result(draftSha256Now === intakeDraftSha256) },
+      { name: DATA_QUALITY_CHECKS[1], result: result(ruleSetHash === RULE_SET_SHA256) },
+    ],
+  };
+}
+
+// Why a settings command is refused before anything is sent, or null.
+function settingError(setting, value) {
+  if (!ACCOUNT_SETTINGS.includes(setting)) return `the setting must be ${ACCOUNT_SETTINGS.join(" or ")}, not ${setting}`;
+  if (!SETTING_VALUES.includes(value)) return `the value must be ${SETTING_VALUES.join(" or ")}, not ${value}`;
+  return null;
+}
+
+const approverNameError = (name) => (APPROVER_NAME.test(name) ? null : "an approver name is 1 to 40 lowercase letters, digits or dashes");
+
+// A named approver's private key file (0600) and public key file.
+const approverFiles = (name) => [`approver-${name}-key.json`, `approver-${name}.txt`];
+
+// The keys file with the agent key's request key replaced, or removed when it
+// was cleared.
+function withAgentSigningKey(keys, signingKeyHex) {
+  const agent = { ...keys.agent };
+  delete agent.signing_key;
+  if (signingKeyHex !== null) agent.signing_key = signingKeyHex;
+  return { ...keys, agent };
+}
 
 // ── setup ──────────────────────────────────────────────────────────────────
 
@@ -290,7 +362,7 @@ function utcStamp() {
   return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }
 
-async function cmdReview(draftPath, model, answersPath) {
+async function cmdReview(draftPath, model, answersPath, withoutActor) {
   const keys = loadKeys();
   const agent = clientFor(keys.agent);
   const { rules, ruleSetHash } = loadRules();
@@ -298,12 +370,19 @@ async function cmdReview(draftPath, model, answersPath) {
   const draft = readInput(draftPath);
   const draftHash = sha256Hex(draft);
   const level = draftClassification(draft);
+  // The time the draft was read: the as_of of every step's data checks.
+  const readAt = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const recorded = loadAnswers(answersPath);
   const now = utcStamp();
   const jobId = `claims-review-${draftHash.slice(0, 12)}-${now}`;
   const out = join("records", jobId);
   const payloads = {};
-  const policy = (objectId) => ({ object_type: "text", object_id: OBJECT_PREFIX + objectId, classification: level });
+  // The step's policy context: its object, the draft's classification and the
+  // data checks, computed again now, the draft re-read.
+  const policy = (objectId) => ({
+    object_type: "text", object_id: OBJECT_PREFIX + objectId, classification: level,
+    data_quality: dataQuality(draftHash, sha256Hex(readInput(draftPath)), ruleSetHash, readAt),
+  });
 
   const intakePayload = {
     form: FORM, step: "intake", draft_sha256: draftHash, draft_bytes: Buffer.byteLength(draft, "utf8"),
@@ -315,6 +394,10 @@ async function cmdReview(draftPath, model, answersPath) {
     intake = await job.step("intake", {
       after: [], payload_text: canonical(intakePayload), program_id: PROGRAM_ID, route_id: ROUTE_INTAKE,
       registry_record_hash: REGISTRY_RECORD_HASH, policy_context: policy("intake"),
+      // The gate step names its agent, as policy v4 requires of every step;
+      // --without-actor leaves the name out on purpose, so the policy
+      // refuses the draft here, before any model is called.
+      ...(withoutActor ? {} : { attested_context: { attested: true, actor_id: ACTOR_ID } }),
     });
   } catch (err) {
     if (!(err instanceof APIError)) throw err;
@@ -356,6 +439,7 @@ async function cmdReview(draftPath, model, answersPath) {
     claimsStep = await job.step("claims", {
       after: ["intake"], payload_text: canonical(claimsPayload), program_id: PROGRAM_ID, route_id: ROUTE_CLAIMS,
       registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answerTexts.claims,
+      request_substance: usageSubstance({ input_tokens: listed.inputTokens, output_tokens: listed.outputTokens }),
       attested_context: {
         attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: listed.model, prompt_hash: claimsPromptHash,
         decision_kind: "claims.list", decision_result: String(listed.fields.claims.length),
@@ -391,6 +475,7 @@ async function cmdReview(draftPath, model, answersPath) {
       receipt = await job.step(rule.id, {
         after: ["claims"], payload_text: canonical(payload), program_id: PROGRAM_ID, route_id: ROUTE_RULE,
         registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answerTexts[rule.id],
+        request_substance: usageSubstance({ input_tokens: answer.inputTokens, output_tokens: answer.outputTokens }),
         attested_context: {
           attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: answer.model, prompt_hash: promptHash,
           decision_kind: "claims.rule_check", decision_result: answer.verdict,
@@ -437,6 +522,7 @@ async function cmdReview(draftPath, model, answersPath) {
     final = await job.step("verdict", {
       after: rules.map((r) => r.id), final: true, payload_text: canonical(verdictPayload), program_id: PROGRAM_ID,
       route_id: ROUTE_VERDICT, registry_record_hash: REGISTRY_RECORD_HASH, ai_output_text: answerTexts.verdict,
+      request_substance: usageSubstance({ input_tokens: explained.inputTokens, output_tokens: explained.outputTokens }),
       attested_context: {
         attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: explained.model, prompt_hash: verdictPromptHash,
         decision_kind: "claims.verdict", decision_result: verdict,
@@ -629,16 +715,20 @@ const feedCheck = () => [`verdifax-verify --signals signals.json --feed-head-max
 
 // ── sign-off ───────────────────────────────────────────────────────────────
 
-function approverPrivateKey() {
-  if (!existsSync("approver-key.json")) fail("no approver-key.json here; run `claims-review setup` first");
-  return Buffer.from(JSON.parse(readFileSync("approver-key.json", "utf8")).private_key, "hex");
+// The first approver's private key, or a named approver's.
+function approverPrivateKey(name) {
+  const path = name ? approverFiles(name)[0] : "approver-key.json";
+  if (!existsSync(path)) fail(`no ${path} here; run \`claims-review ${name ? "approver-add " + name : "setup"}\` first`);
+  return Buffer.from(JSON.parse(readFileSync(path, "utf8")).private_key, "hex");
 }
 
-async function cmdSignOff(jobId, decision, note, receiptRunId) {
+async function cmdSignOff(jobId, decision, note, receiptRunId, approverName) {
+  if (approverName && approverNameError(approverName)) fail(approverNameError(approverName));
   const keys = loadKeys();
   const agent = clientFor(keys.agent);
   const owner = clientFor(keys.owner);
-  const key = approverPrivateKey();
+  const key = approverPrivateKey(approverName);
+  const approverFile = approverName ? approverFiles(approverName)[1] : "approver.txt";
   let target;
   let folder;
   let runId;
@@ -658,10 +748,123 @@ async function cmdSignOff(jobId, decision, note, receiptRunId) {
   writeJSON(join(folder, "signoff-history.json"), await owner.getSignOffHistory());
   console.log(`sign-off ${decision} recorded as sequence ${record.sequence}, hash ${record.signoff_hash}`);
   const recordFile = receiptRunId ? join(folder, "receipt.json") : join(folder, "steps", "verdict.json");
-  console.log(`verify: verdifax-verify --signoff ${join(folder, "signoffs.json")} --approver-key approver.txt ${recordFile}`);
+  console.log(`verify: verdifax-verify --signoff ${join(folder, "signoffs.json")} --approver-key ${approverFile} ${recordFile}`);
   const [history, historyReason] = historyCheck(join(folder, "signoff-history.json"));
   console.log(`verify: ${history}`);
   console.log(historyReason);
+}
+
+// ── the account: approvers, settings, keys, deletion, webhooks ─────────────
+// Each change is made with the owner key (the agent key for its own request
+// key) and sealed by the server in the account's feed, which `feed` saves:
+// the feed is the record of every change, so no command keeps its own.
+
+const ownerClient = () => clientFor(loadKeys().owner);
+
+// The id the server gave this approver when it was added, kept with its key.
+function approverId(name) {
+  const [privatePath] = approverFiles(name);
+  if (!existsSync(privatePath)) fail(`no ${privatePath} here; run \`claims-review approver-add ${name}\` first`);
+  return Number(JSON.parse(readFileSync(privatePath, "utf8")).id);
+}
+
+async function cmdApproverAdd(name) {
+  if (approverNameError(name)) fail(approverNameError(name));
+  const [privatePath, publicPath] = approverFiles(name);
+  if (existsSync(privatePath)) fail(`${privatePath} exists here; this approver is already added`);
+  const owner = ownerClient();
+  const approver = generateRequestKeyPair();
+  const answer = await owner.registerApprover(`Claims review approver ${name}`, approver.privateKey);
+  writePrivate(privatePath, JSON.stringify({ private_key: approver.privateKey.toString("hex"), id: answer.id }) + "\n");
+  writeFileSync(publicPath, approver.publicKey.toString("base64"));
+  writeJSON("approvers.json", await owner.listApprovers());
+  console.log(`approver ${name} added; its public key is in ${publicPath}`);
+}
+
+async function cmdApproverRevoke(name) {
+  if (approverNameError(name)) fail(approverNameError(name));
+  const owner = ownerClient();
+  await owner.revokeApprover(approverId(name));
+  writeJSON("approvers.json", await owner.listApprovers());
+  console.log(`approver ${name} revoked; the sign-offs it gave stay as they were`);
+}
+
+async function cmdSettings(setting, value) {
+  if (settingError(setting, value)) fail(settingError(setting, value));
+  await ownerClient().setAccountSetting(setting, value);
+  console.log(`${setting} is ${value}`);
+}
+
+async function cmdRequestKeyRotate() {
+  const keys = loadKeys();
+  const next = generateRequestKeyPair();
+  await clientFor(keys.agent).rotateRequestKey(next.privateKey);
+  writePrivate("demo-keys.json", JSON.stringify(withAgentSigningKey(keys, next.privateKey.toString("hex")), null, 2) + "\n");
+  console.log("the agent key's request key was replaced, approved by the key it replaced");
+}
+
+async function cmdRequestKeyClear() {
+  const keys = loadKeys();
+  await clientFor(keys.agent).clearRequestKey();
+  writePrivate("demo-keys.json", JSON.stringify(withAgentSigningKey(keys, null), null, 2) + "\n");
+  console.log("the agent key's request key was cleared, approved by that key");
+}
+
+async function cmdKeyRevoke() {
+  const keys = loadKeys();
+  const owner = clientFor(keys.owner);
+  await owner.revokeAccountKey(Number(keys.agent.id));
+  writeJSON("account-keys.json", await owner.listAccountKeys());
+  console.log(`agent key ${keys.agent.id} revoked; the records it sealed stay as they were`);
+}
+
+// A deleted step's record is replaced by its tombstone, which verdifax-verify
+// --job reads in its place (R250).
+function replaceWithTombstone(folder, step, tombstone) {
+  writeDeletedSteps(folder, { [step]: tombstone });
+  const record = join(folder, "steps", `${step}.json`);
+  if (existsSync(record)) unlinkSync(record);
+}
+
+async function cmdDeleteStep(jobId, step) {
+  const folder = join("records", jobId);
+  const recordPath = join(folder, "steps", `${step}.json`);
+  if (!existsSync(recordPath)) fail(`${recordPath} does not exist; delete-step needs the step's sealed record`);
+  const record = JSON.parse(readFileSync(recordPath, "utf8"));
+  await ownerClient().deleteRun(Number(record.run_id), record.manifest_hash);
+  const tombstone = deletedSteps(await readAccountFeed(loadKeys()), jobId)[step];
+  if (!tombstone) fail(`the feed holds no run.deleted event for ${step} of ${jobId}`);
+  replaceWithTombstone(folder, step, tombstone);
+  console.log(`step ${step} of ${jobId} deleted; its tombstone is ${join(folder, "steps", step + DELETED_STEP_SUFFIX)}`);
+  console.log(`verify: verdifax-verify --job ${join(folder, "steps")}`);
+}
+
+async function cmdWebhookSubscribe(url) {
+  const hook = await ownerClient().createWebhook(url);
+  writePrivate("webhook.json", JSON.stringify(hook, null, 2) + "\n");
+  console.log(`webhook ${hook.id} subscribed to every kind of event at ${url}; its secret is in webhook.json`);
+}
+
+// Removes the subscription webhook-subscribe made, as the owner, sealed in the
+// feed as webhook.deleted. webhook.json is kept: its secret can be published
+// once the subscription is gone, since it then signs nothing.
+async function cmdWebhookRemove() {
+  if (!existsSync("webhook.json")) fail("no webhook.json here; run `claims-review webhook-subscribe URL` first");
+  const id = Number(JSON.parse(readFileSync("webhook.json", "utf8")).id);
+  writeJSON("webhook-removed.json", await ownerClient().deleteWebhook(id));
+  console.log(`webhook ${id} removed; its removal is sealed in the account's feed`);
+}
+
+async function cmdWebhookList() {
+  // The lists alone, the same shape in every language: webhooks.json the
+  // account's webhooks, webhook-deliveries.json each one's deliveries by id.
+  const owner = ownerClient();
+  const hooks = (await owner.listWebhooks()).webhooks || [];
+  writeJSON("webhooks.json", hooks);
+  const deliveries = {};
+  for (const h of hooks) deliveries[String(h.id)] = (await owner.listWebhookDeliveries(Number(h.id), { limit: 500 })).deliveries || [];
+  writeJSON("webhook-deliveries.json", deliveries);
+  console.log(`${hooks.length} webhook(s); their deliveries are in webhook-deliveries.json`);
 }
 
 // ── feed ───────────────────────────────────────────────────────────────────
@@ -686,6 +889,13 @@ function publicationTargets(jobId, receipt) {
   return { folder, targets: { ...summary.run_ids } };
 }
 
+// The records a publish or unpublish acts on, sorted: every target but a
+// deleted step, which has no record left; its tombstone stands in its place in
+// the feed (R250).
+function publishable(folder, targets) {
+  return Object.keys(targets).filter((n) => !existsSync(join(folder, "steps", `${n}${DELETED_STEP_SUFFIX}`))).sort();
+}
+
 async function publication(jobId, receipt, publish) {
   const keys = loadKeys();
   const owner = clientFor(keys.owner);
@@ -694,7 +904,7 @@ async function publication(jobId, receipt, publish) {
   // publication, so the sealed publication saved earlier is kept.
   const earlier = existsSync(join(folder, "published.json")) ? JSON.parse(readFileSync(join(folder, "published.json"), "utf8")) : {};
   const published = {};
-  for (const name of Object.keys(targets).sort()) {
+  for (const name of publishable(folder, targets)) {
     const runId = targets[name];
     const answer = publish ? await owner.publishRun(runId) : await owner.unpublishRun(runId);
     // A completed run is served at its bundle address, a stopped run at its
@@ -735,7 +945,12 @@ function printVerifyCommands(jobId) {
   console.log(`verify with verdifax-verify ${MIN_VERIFIER} or later:`);
   const traces = existsSync(join(folder, TRACES_FOLDER)) ? ` --aivp-traces ${join(folder, TRACES_FOLDER)}` : "";
   console.log(`  verdifax-verify --job ${join(folder, "steps")}${traces}`);
-  console.log(`  verdifax-verify --account-policy ${join(REPO, "policy", POLICY_FILE)} ${join(folder, "steps", "verdict.json")}`);
+  if (existsSync(join(folder, "signoffs.json"))) {
+    console.log(`  verdifax-verify --account-policy ${join(REPO, "policy", POLICY_FILE)} --signoff ${join(folder, "signoffs.json")} --approver-key approver.txt ${join(folder, "steps", "verdict.json")}`);
+  } else {
+    console.log(`  verdifax-verify --account-policy ${join(REPO, "policy", POLICY_FILE)} ${join(folder, "steps", "verdict.json")}`);
+    console.log(`  ${SIGNOFF_PENDING_REASON}`);
+  }
   if (existsSync(join(folder, "signoffs.json"))) {
     console.log(`  verdifax-verify --signoff ${join(folder, "signoffs.json")} --approver-key approver.txt ${join(folder, "steps", "verdict.json")}`);
   }
@@ -771,17 +986,20 @@ async function main() {
     case "review": {
       const model = option(args, "--model") || DEFAULT_MODEL;
       const answers = option(args, "--answers");
+      const withoutActor = args.includes("--without-actor");
+      if (withoutActor) args.splice(args.indexOf("--without-actor"), 1);
       if (args.length !== 1) fail("review takes one draft file");
-      return cmdReview(args[0], model, answers);
+      return cmdReview(args[0], model, answers, withoutActor);
     }
     case "sign-off": {
       const note = option(args, "--note");
       const receipt = option(args, "--receipt");
+      const approverName = option(args, "--approver");
       const decision = args.pop();
       const jobId = args.shift();
       if (!["approve", "reject"].includes(decision)) fail("sign-off needs approve or reject");
       if (!receipt && !jobId) fail("sign-off needs a JOB_ID, or --receipt RUN_ID");
-      return cmdSignOff(jobId, decision, note, receipt);
+      return cmdSignOff(jobId, decision, note, receipt, approverName);
     }
     case "publish":
     case "unpublish": {
@@ -790,19 +1008,44 @@ async function main() {
       if (!receipt && !jobId) fail(`${command} needs a JOB_ID, or --receipt RUN_ID`);
       return publication(jobId, receipt, command === "publish");
     }
+    case "approver-add":
+    case "approver-revoke":
+      if (args.length !== 1) fail(`${command} takes a NAME`);
+      return command === "approver-add" ? cmdApproverAdd(args[0]) : cmdApproverRevoke(args[0]);
+    case "settings":
+      if (args.length !== 2) fail("settings takes a SETTING and a VALUE");
+      return cmdSettings(args[0], args[1]);
+    case "request-key-rotate":
+      return cmdRequestKeyRotate();
+    case "request-key-clear":
+      return cmdRequestKeyClear();
+    case "key-revoke":
+      return cmdKeyRevoke();
+    case "delete-step":
+      if (args.length !== 2) fail("delete-step takes a JOB_ID and a STEP");
+      return cmdDeleteStep(args[0], args[1]);
+    case "webhook-subscribe":
+      if (args.length !== 1) fail("webhook-subscribe takes a URL");
+      return cmdWebhookSubscribe(args[0]);
+    case "webhook-list":
+      return cmdWebhookList();
+    case "webhook-remove":
+      return cmdWebhookRemove();
     case "feed":
       return cmdFeed();
     case "verify-commands":
       if (args.length !== 1) fail("verify-commands takes a JOB_ID");
       return printVerifyCommands(args[0]);
     default:
-      fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, feed, verify-commands JOB_ID");
+      fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-rotate, request-key-clear, key-revoke, delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID");
   }
 }
 
 export {
   canonical, DELETED_STEP_SUFFIX, deletedSteps, draftClassification, FEED_AGE_REASON, HISTORY_AGE_REASON, loadRules, MIN_VERIFIER, printVerifyCommands,
   MODEL_RETRY_TRIES, readInput, RULE_SET, SAVED_HEAD_MAX_AGE, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
+  approverFiles, approverNameError, clientFor, DATA_QUALITY_CHECKS, DATA_QUALITY_SOURCE, dataQuality, POLICY_FILE, REPO, replaceWithTombstone, RULE_SET_SHA256,
+  settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON,
 };
 
 // Node loads the program by its real path, so the path it was started with is

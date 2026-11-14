@@ -141,3 +141,82 @@ check(identical(MIN_VERIFIER, constants$min_verifier) && identical(printed[1], s
         identical(c(SAVED_HEAD_MAX_AGE, HISTORY_AGE_REASON, FEED_AGE_REASON),
                   c(constants$saved_head_max_age, constants$history_age_reason, constants$feed_age_reason)),
       "every printed re-check of a saved history or feed states its head age limit")
+
+# Round 62: the cases every language runs for the every-capability demo.
+usage_cases <- jsonlite::fromJSON(file.path(REPO, "testdata", "usage-cases.json"), simplifyVector = FALSE)
+for (c in usage_cases$cases) {
+  got <- usage_substance(c$usage)
+  check(if (is.null(c$want)) is.null(got) else identical(canonical(got), c$want_canonical), paste("usage declared:", c$name))
+}
+quality_cases <- jsonlite::fromJSON(file.path(REPO, "testdata", "data-quality-cases.json"), simplifyVector = FALSE)
+check(identical(RULE_SET_SHA256, quality_cases$rule_set_sha256) && identical(RULE_SET_SHA256, constants$rule_set_sha256) &&
+        identical(DATA_QUALITY_CHECKS, unlist(constants$data_quality_checks)) && identical(DATA_QUALITY_SOURCE, constants$data_quality_source),
+      "the data checks' names, source and pin match the parity file")
+for (c in quality_cases$cases) {
+  got <- data_quality(c$intake_draft_sha256, c$draft_sha256_now, c$rule_set_hash, quality_cases$as_of)
+  check(identical(canonical(got), c$want_canonical), paste("data checks computed:", c$name))
+}
+check(identical(load_rules()$rule_set_hash, RULE_SET_SHA256), "the loaded rule set is the pinned one")
+policy_v4 <- jsonlite::fromJSON(file.path(REPO, "policy", POLICY_FILE), simplifyVector = FALSE)
+check(identical(POLICY_FILE, constants$policy_file) && identical(unlist(policy_v4$required_attested_fields), "actor_id"), "the policy is v4")
+
+command_cases <- jsonlite::fromJSON(file.path(REPO, "testdata", "command-cases.json"), simplifyVector = FALSE)
+check(all(vapply(command_cases$settings$valid, function(v) is.null(setting_error(v[[1]], v[[2]])), logical(1))) &&
+        all(vapply(command_cases$settings$invalid, function(v) identical(setting_error(v$args[[1]], v$args[[2]]), v$error), logical(1))),
+      "settings are checked before sending")
+names_case <- command_cases$approver_names
+check(all(vapply(names_case$valid, function(n) is.null(approver_name_error(n)), logical(1))) &&
+        all(vapply(names_case$invalid, function(n) identical(approver_name_error(n), names_case$error), logical(1))) &&
+        identical(approver_files(names_case$files$name), c(names_case$files$private_key, names_case$files$public_key)),
+      "approver names and files")
+key_case <- command_cases$request_key
+check(identical(canonical(with_agent_signing_key(key_case$keys, key_case$rotated_to)), canonical(key_case$after_rotate)) &&
+        identical(canonical(with_agent_signing_key(key_case$keys, NULL)), canonical(key_case$after_clear)) &&
+        !is.null(client_for(key_case$after_clear$agent)),
+      "the agent's request key in the keys file")
+delete_case <- command_cases$delete_step
+tomb <- deleted_steps(delete_case$feed, delete_case$job_id)[[delete_case$step]]
+delete_dir <- tempfile("claims-review-")
+dir.create(file.path(delete_dir, "steps"), recursive = TRUE)
+writeLines(canonical(delete_case$record), file.path(delete_dir, "steps", paste0(delete_case$step, ".json")))
+replace_with_tombstone(delete_dir, delete_case$step, tomb)
+written <- jsonlite::fromJSON(file.path(delete_dir, delete_case$want_files[[1]]), simplifyVector = FALSE)
+check(identical(canonical(tomb), canonical(delete_case$want_tombstone)) && identical(canonical(written), canonical(delete_case$want_tombstone)) &&
+        !file.exists(file.path(delete_dir, delete_case$want_removed[[1]])),
+      "a deleted step is replaced by its tombstone")
+unlink(delete_dir, recursive = TRUE)
+missing_dir <- tempfile("claims-review-")
+dir.create(missing_dir)
+old_wd <- setwd(missing_dir)
+missing_out <- suppressWarnings(system2(file.path(R.home("bin"), "Rscript"), c(file.path(here, "claims-review.R"), "delete-step", delete_case$job_id, "rule-03"),
+                                        stdout = TRUE, stderr = TRUE, env = "CLAIMS_REVIEW_NO_MAIN="))
+setwd(old_wd)
+unlink(missing_dir, recursive = TRUE)
+check(identical(attr(missing_out, "status"), 1L) && any(grepl(delete_case$missing_step_error, missing_out, fixed = TRUE)),
+      "delete-step needs the step's sealed record")
+
+pub_case <- command_cases$publication
+pub_dir <- tempfile("claims-review-")
+dir.create(file.path(pub_dir, "steps"), recursive = TRUE)
+for (step in pub_case$tombstones) writeLines("{}", file.path(pub_dir, "steps", paste0(step, DELETED_STEP_SUFFIX)))
+check(identical(publishable(pub_dir, pub_case$targets), unlist(pub_case$want)), "publication skips a deleted step")
+unlink(pub_dir, recursive = TRUE)
+
+vc <- command_cases$verify_commands
+policy_path <- file.path(REPO, "policy", POLICY_FILE)
+vc_want <- function(lines) vapply(lines, function(l) sub("SIGNOFF_PENDING_REASON", SIGNOFF_PENDING_REASON, sub("POLICY", policy_path, l, fixed = TRUE), fixed = TRUE), "", USE.NAMES = FALSE)
+vc_printed <- function() {
+  out <- capture.output(print_verify_commands(vc$job_id))
+  out[grepl("--account-policy ", out, fixed = TRUE) | out == paste0("  ", SIGNOFF_PENDING_REASON)]
+}
+vc_dir <- tempfile("claims-review-")
+dir.create(file.path(vc_dir, "records", vc$job_id, "steps"), recursive = TRUE)
+old_wd <- setwd(vc_dir)
+without <- vc_printed()
+writeLines("[]", file.path("records", vc$job_id, "signoffs.json"))
+with_signoffs <- vc_printed()
+setwd(old_wd)
+unlink(vc_dir, recursive = TRUE)
+check(identical(SIGNOFF_PENDING_REASON, constants$signoff_pending_reason) &&
+        identical(without, vc_want(vc$without_signoffs)) && identical(with_signoffs, vc_want(vc$with_signoffs)),
+      "the account-policy check passes the sign-offs once given")

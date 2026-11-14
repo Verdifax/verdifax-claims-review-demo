@@ -1,0 +1,56 @@
+{
+  "note": "The usage every language declares for a step (round 62): given the model's own usage report for the step's model call, the exact request_substance the step sends; the gate step calls no model and sends none (null). Each language's tests run every case and compare the canonical bytes.",
+  "cases": [
+    {
+      "name": "a model step",
+      "usage": {
+        "input_tokens": 812,
+        "output_tokens": 164
+      },
+      "want": {
+        "cost": {
+          "input_tokens": 812,
+          "output_tokens": 164,
+          "total_tokens": 976
+        }
+      },
+      "want_canonical": "{\"cost\":{\"input_tokens\":812,\"output_tokens\":164,\"total_tokens\":976}}"
+    },
+    {
+      "name": "recorded answers in tests, which report no usage",
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0
+      },
+      "want": {
+        "cost": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "total_tokens": 0
+        }
+      },
+      "want_canonical": "{\"cost\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}"
+    },
+    {
+      "name": "a long draft over the per-run budget",
+      "usage": {
+        "input_tokens": 104812,
+        "output_tokens": 210
+      },
+      "want": {
+        "cost": {
+          "input_tokens": 104812,
+          "output_tokens": 210,
+          "total_tokens": 105022
+        }
+      },
+      "want_canonical": "{\"cost\":{\"input_tokens\":104812,\"output_tokens\":210,\"total_tokens\":105022}}"
+    },
+    {
+      "name": "the gate step, which calls no model",
+      "usage": null,
+      "want": null,
+      "want_canonical": null
+    }
+  ]
+}

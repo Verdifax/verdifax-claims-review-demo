@@ -224,3 +224,125 @@ class HeadAgeLimits(unittest.TestCase):
         self.assertEqual(lines[feed + 1], "  " + cr.FEED_AGE_REASON)
         self.assertEqual((cr.SAVED_HEAD_MAX_AGE, cr.HISTORY_AGE_REASON, cr.FEED_AGE_REASON),
                          (constants["saved_head_max_age"], constants["history_age_reason"], constants["feed_age_reason"]))
+
+
+# Round 62: the cases every language runs for the every-capability demo.
+USAGE = json.loads((HERE.parent / "testdata" / "usage-cases.json").read_text(encoding="utf-8"))
+QUALITY = json.loads((HERE.parent / "testdata" / "data-quality-cases.json").read_text(encoding="utf-8"))
+COMMANDS = json.loads((HERE.parent / "testdata" / "command-cases.json").read_text(encoding="utf-8"))
+
+
+class Round62(unittest.TestCase):
+    def test_usage_declared_for_every_model_step(self):
+        for case in USAGE["cases"]:
+            got = cr.usage_substance(case["usage"])
+            self.assertEqual(got, case["want"], case["name"])
+            self.assertEqual(None if got is None else cr.canonical(got), case["want_canonical"], case["name"])
+
+    def test_data_checks_are_computed(self):
+        self.assertEqual(cr.RULE_SET_SHA256, QUALITY["rule_set_sha256"])
+        self.assertEqual(cr.RULE_SET_SHA256, PARITY["constants"]["rule_set_sha256"])
+        self.assertEqual(list(cr.DATA_QUALITY_CHECKS), PARITY["constants"]["data_quality_checks"])
+        self.assertEqual(cr.DATA_QUALITY_SOURCE, PARITY["constants"]["data_quality_source"])
+        for case in QUALITY["cases"]:
+            got = cr.data_quality(case["intake_draft_sha256"], case["draft_sha256_now"], case["rule_set_hash"], QUALITY["as_of"])
+            self.assertEqual(got, case["want"], case["name"])
+            self.assertEqual(cr.canonical(got), case["want_canonical"], case["name"])
+
+    def test_the_loaded_rule_set_is_the_pinned_one(self):
+        _, rule_set_hash = cr.load_rules()
+        self.assertEqual(rule_set_hash, cr.RULE_SET_SHA256)
+
+    def test_the_policy_is_v4(self):
+        self.assertEqual(cr.POLICY_FILE, PARITY["constants"]["policy_file"])
+        policy = json.loads((cr.REPO / "policy" / cr.POLICY_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(policy["required_attested_fields"], ["actor_id"])
+
+    def test_settings_are_checked_before_sending(self):
+        for setting, value in COMMANDS["settings"]["valid"]:
+            self.assertIsNone(cr.setting_error(setting, value))
+        for case in COMMANDS["settings"]["invalid"]:
+            self.assertEqual(cr.setting_error(*case["args"]), case["error"])
+
+    def test_approver_names_and_files(self):
+        for name in COMMANDS["approver_names"]["valid"]:
+            self.assertIsNone(cr.approver_name_error(name), name)
+        for name in COMMANDS["approver_names"]["invalid"]:
+            self.assertEqual(cr.approver_name_error(name), COMMANDS["approver_names"]["error"], name)
+        files = COMMANDS["approver_names"]["files"]
+        private, public = cr.approver_files(files["name"])
+        self.assertEqual((str(private), str(public)), (files["private_key"], files["public_key"]))
+
+    def test_the_agent_request_key_in_the_keys_file(self):
+        case = COMMANDS["request_key"]
+        self.assertEqual(cr.with_agent_signing_key(case["keys"], case["rotated_to"]), case["after_rotate"])
+        self.assertEqual(cr.with_agent_signing_key(case["keys"], None), case["after_clear"])
+        client = cr.client_for(case["after_clear"]["agent"])
+        self.assertIsNotNone(client, "a key whose request key was cleared still makes a client, which sends unsigned")
+
+    def test_a_deleted_step_is_replaced_by_its_tombstone(self):
+        import tempfile
+        case = COMMANDS["delete_step"]
+        self.assertEqual(cr.deleted_steps(case["feed"], case["job_id"]).get(case["step"]), case["want_tombstone"])
+        with tempfile.TemporaryDirectory() as d:
+            folder = pathlib.Path(d)
+            (folder / "steps").mkdir()
+            (folder / "steps" / ("%s.json" % case["step"])).write_text(json.dumps(case["record"]), encoding="utf-8")
+            cr.replace_with_tombstone(folder, case["step"], case["want_tombstone"])
+            for f in case["want_files"]:
+                self.assertEqual(json.loads((folder / f).read_text(encoding="utf-8")), case["want_tombstone"])
+            for f in case["want_removed"]:
+                self.assertFalse((folder / f).exists(), f)
+
+    def test_delete_step_needs_the_sealed_record(self):
+        import contextlib
+        import io
+        import os
+        import tempfile
+        case = COMMANDS["delete_step"]
+        here = os.getcwd()
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                    cr.main(["delete-step", case["job_id"], "rule-03"])
+            finally:
+                os.chdir(here)
+        self.assertIn(case["missing_step_error"], err.getvalue())
+
+    def test_publication_skips_a_deleted_step(self):
+        import tempfile
+        case = COMMANDS["publication"]
+        with tempfile.TemporaryDirectory() as d:
+            folder = pathlib.Path(d)
+            (folder / "steps").mkdir()
+            for step in case["tombstones"]:
+                (folder / "steps" / (step + cr.DELETED_STEP_SUFFIX)).write_text("{}", encoding="utf-8")
+            self.assertEqual(cr.publishable(folder, case["targets"]), case["want"])
+
+    def test_the_account_policy_check_passes_the_signoffs_once_given(self):
+        import contextlib
+        import io
+        import os
+        import tempfile
+        case = COMMANDS["verify_commands"]
+        self.assertEqual(cr.SIGNOFF_PENDING_REASON, PARITY["constants"]["signoff_pending_reason"])
+        policy = str(cr.REPO / "policy" / cr.POLICY_FILE)
+        def printed() -> list:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                cr.print_verify_commands(case["job_id"])
+            return [l for l in out.getvalue().splitlines() if "--account-policy " in l or l == "  " + cr.SIGNOFF_PENDING_REASON]
+        def want(lines: list) -> list:
+            return [l.replace("POLICY", policy).replace("SIGNOFF_PENDING_REASON", cr.SIGNOFF_PENDING_REASON) for l in lines]
+        here = os.getcwd()
+        with tempfile.TemporaryDirectory() as d:
+            os.chdir(d)
+            try:
+                (pathlib.Path("records") / case["job_id"] / "steps").mkdir(parents=True)
+                self.assertEqual(printed(), want(case["without_signoffs"]))
+                (pathlib.Path("records") / case["job_id"] / "signoffs.json").write_text("[]", encoding="utf-8")
+                self.assertEqual(printed(), want(case["with_signoffs"]))
+            finally:
+                os.chdir(here)

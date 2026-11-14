@@ -6,9 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -449,5 +452,321 @@ func TestEveryPrintedRecheckOfASavedHistoryOrFeedStatesItsHeadAgeLimit(t *testin
 		if !found {
 			t.Fatalf("the %s re-check does not state its head age limit and reason:\n%s", mode, out.String())
 		}
+	}
+}
+
+// Round 62: the cases every language runs for the every-capability demo.
+func readCases(t *testing.T, name string, into any) {
+	t.Helper()
+	text, readErr := os.ReadFile(filepath.Join(repo, "testdata", name))
+	if readErr != nil {
+		t.Fatalf("read %s: %v", name, readErr)
+	}
+	if decodeErr := json.Unmarshal(text, into); decodeErr != nil {
+		t.Fatalf("decode %s: %v", name, decodeErr)
+	}
+}
+
+// asJSON is a value as generic JSON, so it compares with a case's want.
+func asJSON(t *testing.T, value any) any {
+	t.Helper()
+	encoded, encodeErr := json.Marshal(value)
+	if encodeErr != nil {
+		t.Fatal(encodeErr)
+	}
+	var out any
+	if decodeErr := json.Unmarshal(encoded, &out); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	return out
+}
+
+func TestUsageIsDeclaredForEveryModelStep(t *testing.T) {
+	var cases struct {
+		Cases []struct {
+			Name          string       `json:"name"`
+			Usage         *usageReport `json:"usage"`
+			Want          any          `json:"want"`
+			WantCanonical *string      `json:"want_canonical"`
+		} `json:"cases"`
+	}
+	readCases(t, "usage-cases.json", &cases)
+	for _, c := range cases.Cases {
+		got := usageSubstance(c.Usage)
+		if got == nil {
+			if c.Want != nil || c.WantCanonical != nil {
+				t.Errorf("%s: no usage declared, want %v", c.Name, c.Want)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(asJSON(t, got), c.Want) || c.WantCanonical == nil || canonical(got) != *c.WantCanonical {
+			t.Errorf("%s: %s, want %v", c.Name, canonical(got), c.Want)
+		}
+	}
+}
+
+func TestTheDataChecksAreComputed(t *testing.T) {
+	var cases struct {
+		RuleSetSHA256 string `json:"rule_set_sha256"`
+		AsOf          string `json:"as_of"`
+		Cases         []struct {
+			Name          string `json:"name"`
+			Intake        string `json:"intake_draft_sha256"`
+			Now           string `json:"draft_sha256_now"`
+			RuleSetHash   string `json:"rule_set_hash"`
+			Want          any    `json:"want"`
+			WantCanonical string `json:"want_canonical"`
+		} `json:"cases"`
+	}
+	readCases(t, "data-quality-cases.json", &cases)
+	if cases.RuleSetSHA256 != ruleSetSHA256 {
+		t.Fatalf("the pinned rule set hash is %s, the cases say %s", ruleSetSHA256, cases.RuleSetSHA256)
+	}
+	for _, c := range cases.Cases {
+		got := asJSON(t, dataQuality(c.Intake, c.Now, c.RuleSetHash, cases.AsOf))
+		if !reflect.DeepEqual(got, c.Want) || canonical(got) != c.WantCanonical {
+			t.Errorf("%s: %s, want %s", c.Name, canonical(got), c.WantCanonical)
+		}
+	}
+}
+
+func TestTheLoadedRuleSetIsThePinnedOneAndThePolicyIsV4(t *testing.T) {
+	if _, hash := loadRules(); hash != ruleSetSHA256 {
+		t.Fatalf("the rule set hashes to %s, the pin is %s", hash, ruleSetSHA256)
+	}
+	var policy struct {
+		Required []string `json:"required_attested_fields"`
+	}
+	if decodeErr := json.Unmarshal(readFile(filepath.Join(repo, "policy", policyFile)), &policy); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if policyFile != "claims-review-v4.json" || !reflect.DeepEqual(policy.Required, []string{"actor_id"}) {
+		t.Fatalf("policy %s requires %v", policyFile, policy.Required)
+	}
+}
+
+type commandCases struct {
+	Settings struct {
+		Valid   [][2]string `json:"valid"`
+		Invalid []struct {
+			Args  [2]string `json:"args"`
+			Error string    `json:"error"`
+		} `json:"invalid"`
+	} `json:"settings"`
+	ApproverNames struct {
+		Valid   []string `json:"valid"`
+		Invalid []string `json:"invalid"`
+		Error   string   `json:"error"`
+		Files   struct {
+			Name       string `json:"name"`
+			PrivateKey string `json:"private_key"`
+			PublicKey  string `json:"public_key"`
+		} `json:"files"`
+	} `json:"approver_names"`
+	DeleteStep struct {
+		JobID            string                 `json:"job_id"`
+		Step             string                 `json:"step"`
+		Record           json.RawMessage        `json:"record"`
+		Feed             []verdifax.SignalEvent `json:"feed"`
+		WantTombstone    any                    `json:"want_tombstone"`
+		WantFiles        []string               `json:"want_files"`
+		WantRemoved      []string               `json:"want_removed"`
+		MissingStepError string                 `json:"missing_step_error"`
+	} `json:"delete_step"`
+	RequestKey struct {
+		Keys        map[string]any `json:"keys"`
+		RotatedTo   string         `json:"rotated_to"`
+		AfterRotate map[string]any `json:"after_rotate"`
+		AfterClear  map[string]any `json:"after_clear"`
+	} `json:"request_key"`
+}
+
+func TestTheRound62CommandsDecideAlike(t *testing.T) {
+	var c commandCases
+	readCases(t, "command-cases.json", &c)
+	for _, v := range c.Settings.Valid {
+		if got := settingError(v[0], v[1]); got != "" {
+			t.Errorf("settings %v refused: %s", v, got)
+		}
+	}
+	for _, v := range c.Settings.Invalid {
+		if got := settingError(v.Args[0], v.Args[1]); got != v.Error {
+			t.Errorf("settings %v: %q, want %q", v.Args, got, v.Error)
+		}
+	}
+	for _, name := range c.ApproverNames.Valid {
+		if approverNameError(name) != "" {
+			t.Errorf("approver name %q refused", name)
+		}
+	}
+	for _, name := range c.ApproverNames.Invalid {
+		if approverNameError(name) != c.ApproverNames.Error {
+			t.Errorf("approver name %q accepted", name)
+		}
+	}
+	if private, public := approverFiles(c.ApproverNames.Files.Name); private != c.ApproverNames.Files.PrivateKey || public != c.ApproverNames.Files.PublicKey {
+		t.Errorf("approver files %s %s", private, public)
+	}
+	rotated := c.RequestKey.RotatedTo
+	if got := withAgentSigningKey(c.RequestKey.Keys, &rotated); !reflect.DeepEqual(asJSON(t, got), asJSON(t, c.RequestKey.AfterRotate)) {
+		t.Errorf("after rotate: %v", got)
+	}
+	if got := withAgentSigningKey(c.RequestKey.Keys, nil); !reflect.DeepEqual(asJSON(t, got), asJSON(t, c.RequestKey.AfterClear)) {
+		t.Errorf("after clear: %v", got)
+	}
+	agent := c.RequestKey.AfterClear["agent"].(map[string]any)
+	if clientFor(agent["secret"].(string), "") == nil {
+		t.Error("a key whose request key was cleared must still make a client, which sends unsigned")
+	}
+}
+
+func TestADeletedStepIsReplacedByItsTombstone(t *testing.T) {
+	var c commandCases
+	readCases(t, "command-cases.json", &c)
+	d := c.DeleteStep
+	tombstone, found := deletedSteps(d.Feed, d.JobID)[d.Step]
+	if !found || !reflect.DeepEqual(asJSON(t, tombstone), d.WantTombstone) {
+		t.Fatalf("tombstone %s", tombstone)
+	}
+	folder := t.TempDir()
+	if mkErr := os.MkdirAll(filepath.Join(folder, "steps"), 0o755); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	if writeErr := os.WriteFile(filepath.Join(folder, "steps", d.Step+".json"), d.Record, 0o644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	replaceWithTombstone(folder, d.Step, tombstone)
+	for _, f := range d.WantFiles {
+		var got any
+		if decodeErr := json.Unmarshal(readFile(filepath.Join(folder, f)), &got); decodeErr != nil || !reflect.DeepEqual(got, d.WantTombstone) {
+			t.Errorf("%s: %v %v", f, got, decodeErr)
+		}
+	}
+	for _, f := range d.WantRemoved {
+		if _, statErr := os.Stat(filepath.Join(folder, f)); statErr == nil {
+			t.Errorf("%s was not removed", f)
+		}
+	}
+}
+
+// TestHelperRunsTheProgram runs main with the arguments after "--" when the
+// test binary is started by a test below; otherwise it does nothing.
+func TestHelperRunsTheProgram(t *testing.T) {
+	if os.Getenv("CLAIMS_REVIEW_RUN_MAIN") != "1" {
+		return
+	}
+	for i, a := range os.Args {
+		if a == "--" {
+			os.Args = append([]string{"claims-review"}, os.Args[i+1:]...)
+			main()
+			os.Exit(0)
+		}
+	}
+}
+
+func TestDeleteStepNeedsTheSealedRecord(t *testing.T) {
+	var c commandCases
+	readCases(t, "command-cases.json", &c)
+	run := exec.Command(os.Args[0], "-test.run=TestHelperRunsTheProgram", "--", "delete-step", c.DeleteStep.JobID, "rule-03")
+	run.Dir = t.TempDir()
+	run.Env = append(os.Environ(), "CLAIMS_REVIEW_RUN_MAIN=1", "CLAIMS_REVIEW_REPO="+repo)
+	out, runErr := run.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(string(out), c.DeleteStep.MissingStepError) {
+		t.Fatalf("want exit 1 naming the missing record, got %v: %s", runErr, out)
+	}
+}
+
+func TestPublicationSkipsADeletedStep(t *testing.T) {
+	var c struct {
+		Publication struct {
+			Targets    map[string]int64 `json:"targets"`
+			Tombstones []string         `json:"tombstones"`
+			Want       []string         `json:"want"`
+		} `json:"publication"`
+	}
+	readCases(t, "command-cases.json", &c)
+	folder := t.TempDir()
+	if mkErr := os.MkdirAll(filepath.Join(folder, "steps"), 0o755); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	for _, step := range c.Publication.Tombstones {
+		if writeErr := os.WriteFile(filepath.Join(folder, "steps", step+deletedStepSuffix), []byte("{}"), 0o644); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if got := publishable(folder, c.Publication.Targets); !reflect.DeepEqual(got, c.Publication.Want) {
+		t.Fatalf("publishable = %v, want %v", got, c.Publication.Want)
+	}
+}
+
+func TestTheAccountPolicyCheckPassesTheSignOffsOnceGiven(t *testing.T) {
+	var c struct {
+		VerifyCommands struct {
+			JobID           string   `json:"job_id"`
+			WithoutSignoffs []string `json:"without_signoffs"`
+			WithSignoffs    []string `json:"with_signoffs"`
+		} `json:"verify_commands"`
+	}
+	readCases(t, "command-cases.json", &c)
+	var parity struct {
+		Constants map[string]any `json:"constants"`
+	}
+	if decodeErr := json.Unmarshal(readFile(filepath.Join(repo, "demo-parity.json")), &parity); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if parity.Constants["signoff_pending_reason"] != signoffPendingReason {
+		t.Fatal("signoffPendingReason differs from demo-parity.json")
+	}
+	policy := filepath.Join(repo, "policy", policyFile)
+	want := func(lines []string) string {
+		out := []string{}
+		for _, l := range lines {
+			out = append(out, strings.ReplaceAll(strings.ReplaceAll(l, "POLICY", policy), "SIGNOFF_PENDING_REASON", signoffPendingReason))
+		}
+		return strings.Join(out, "\n")
+	}
+	printed := func() string {
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			t.Fatal(pipeErr)
+		}
+		stdout := os.Stdout
+		os.Stdout = w
+		printVerifyCommands(c.VerifyCommands.JobID)
+		os.Stdout = stdout
+		_ = w.Close()
+		raw, readErr := io.ReadAll(r)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		kept := []string{}
+		for _, l := range strings.Split(string(raw), "\n") {
+			if strings.Contains(l, "--account-policy ") || l == "  "+signoffPendingReason {
+				kept = append(kept, l)
+			}
+		}
+		return strings.Join(kept, "\n")
+	}
+	here, wdErr := os.Getwd()
+	if wdErr != nil {
+		t.Fatal(wdErr)
+	}
+	dir := t.TempDir()
+	if chErr := os.Chdir(dir); chErr != nil {
+		t.Fatal(chErr)
+	}
+	defer func() { _ = os.Chdir(here) }()
+	if mkErr := os.MkdirAll(filepath.Join("records", c.VerifyCommands.JobID, "steps"), 0o755); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	if got := printed(); got != want(c.VerifyCommands.WithoutSignoffs) {
+		t.Fatalf("without sign-offs:\n%s", got)
+	}
+	if writeErr := os.WriteFile(filepath.Join("records", c.VerifyCommands.JobID, "signoffs.json"), []byte("[]"), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if got := printed(); got != want(c.VerifyCommands.WithSignoffs) {
+		t.Fatalf("with sign-offs:\n%s", got)
 	}
 }

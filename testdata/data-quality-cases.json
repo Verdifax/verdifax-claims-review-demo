@@ -1,0 +1,91 @@
+{
+  "note": "The data checks every language declares on every step (round 62), in policy_context.data_quality: draft_unchanged passes when the draft, re-read and re-hashed before the step, has the hash sealed at intake; rule_set_pinned passes when the rule set's hash is rule_set_sha256. Each result is computed, never assumed; as_of is the time the draft was read at intake. Policy v4 admits a step after the gate only when both pass and as_of is at most 3600 seconds old.",
+  "rule_set_sha256": "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98ae7",
+  "as_of": "2026-11-13T19:00:00Z",
+  "cases": [
+    {
+      "name": "nothing changed",
+      "intake_draft_sha256": "765306e6ff5fa27c46a2fa650e20e35c2efd3eeda7cb2824026f704f40e5606b",
+      "draft_sha256_now": "765306e6ff5fa27c46a2fa650e20e35c2efd3eeda7cb2824026f704f40e5606b",
+      "rule_set_hash": "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98ae7",
+      "want": {
+        "source": "claims-review draft and rule set",
+        "as_of": "2026-11-13T19:00:00Z",
+        "checks": [
+          {
+            "name": "draft_unchanged",
+            "result": "pass"
+          },
+          {
+            "name": "rule_set_pinned",
+            "result": "pass"
+          }
+        ]
+      },
+      "want_canonical": "{\"as_of\":\"2026-11-13T19:00:00Z\",\"checks\":[{\"name\":\"draft_unchanged\",\"result\":\"pass\"},{\"name\":\"rule_set_pinned\",\"result\":\"pass\"}],\"source\":\"claims-review draft and rule set\"}"
+    },
+    {
+      "name": "the draft was edited during the review",
+      "intake_draft_sha256": "765306e6ff5fa27c46a2fa650e20e35c2efd3eeda7cb2824026f704f40e5606b",
+      "draft_sha256_now": "84a23dd5c4cac1d6c842bb0fe5d0acf607c47d68fe1f7ceb641ec34884e8234d",
+      "rule_set_hash": "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98ae7",
+      "want": {
+        "source": "claims-review draft and rule set",
+        "as_of": "2026-11-13T19:00:00Z",
+        "checks": [
+          {
+            "name": "draft_unchanged",
+            "result": "fail"
+          },
+          {
+            "name": "rule_set_pinned",
+            "result": "pass"
+          }
+        ]
+      },
+      "want_canonical": "{\"as_of\":\"2026-11-13T19:00:00Z\",\"checks\":[{\"name\":\"draft_unchanged\",\"result\":\"fail\"},{\"name\":\"rule_set_pinned\",\"result\":\"pass\"}],\"source\":\"claims-review draft and rule set\"}"
+    },
+    {
+      "name": "the rule set is not the pinned one",
+      "intake_draft_sha256": "765306e6ff5fa27c46a2fa650e20e35c2efd3eeda7cb2824026f704f40e5606b",
+      "draft_sha256_now": "765306e6ff5fa27c46a2fa650e20e35c2efd3eeda7cb2824026f704f40e5606b",
+      "rule_set_hash": "d09eb8fcec2ba11613137a13a55bdeb3c3f49d6fb3891f5c9aa827ee5082f4f4",
+      "want": {
+        "source": "claims-review draft and rule set",
+        "as_of": "2026-11-13T19:00:00Z",
+        "checks": [
+          {
+            "name": "draft_unchanged",
+            "result": "pass"
+          },
+          {
+            "name": "rule_set_pinned",
+            "result": "fail"
+          }
+        ]
+      },
+      "want_canonical": "{\"as_of\":\"2026-11-13T19:00:00Z\",\"checks\":[{\"name\":\"draft_unchanged\",\"result\":\"pass\"},{\"name\":\"rule_set_pinned\",\"result\":\"fail\"}],\"source\":\"claims-review draft and rule set\"}"
+    },
+    {
+      "name": "both changed",
+      "intake_draft_sha256": "765306e6ff5fa27c46a2fa650e20e35c2efd3eeda7cb2824026f704f40e5606b",
+      "draft_sha256_now": "84a23dd5c4cac1d6c842bb0fe5d0acf607c47d68fe1f7ceb641ec34884e8234d",
+      "rule_set_hash": "d09eb8fcec2ba11613137a13a55bdeb3c3f49d6fb3891f5c9aa827ee5082f4f4",
+      "want": {
+        "source": "claims-review draft and rule set",
+        "as_of": "2026-11-13T19:00:00Z",
+        "checks": [
+          {
+            "name": "draft_unchanged",
+            "result": "fail"
+          },
+          {
+            "name": "rule_set_pinned",
+            "result": "fail"
+          }
+        ]
+      },
+      "want_canonical": "{\"as_of\":\"2026-11-13T19:00:00Z\",\"checks\":[{\"name\":\"draft_unchanged\",\"result\":\"fail\"},{\"name\":\"rule_set_pinned\",\"result\":\"fail\"}],\"source\":\"claims-review draft and rule set\"}"
+    }
+  ]
+}

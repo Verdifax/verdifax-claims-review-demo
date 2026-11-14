@@ -1,0 +1,161 @@
+{
+  "note": "The inputs and files of the round 62 commands, the same in every language. Every account change these commands make is sealed in the account's feed, which `feed` saves; no command keeps its own log of changes. The SDK calls themselves are exercised against the live server by the readiness run in all four languages; these cases hold what each program decides on its own.",
+  "settings": {
+    "valid": [
+      [
+        "owner-replacement",
+        "blocked"
+      ],
+      [
+        "owner-replacement",
+        "allowed"
+      ],
+      [
+        "verdifax-deletion",
+        "blocked"
+      ],
+      [
+        "verdifax-deletion",
+        "allowed"
+      ]
+    ],
+    "invalid": [
+      {
+        "args": [
+          "owner_replacement",
+          "blocked"
+        ],
+        "error": "the setting must be owner-replacement or verdifax-deletion, not owner_replacement"
+      },
+      {
+        "args": [
+          "verdifax-deletion",
+          "block"
+        ],
+        "error": "the value must be allowed or blocked, not block"
+      }
+    ]
+  },
+  "approver_names": {
+    "valid": [
+      "second",
+      "approver-2"
+    ],
+    "invalid": [
+      "",
+      "Second",
+      "../x",
+      "a b",
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    ],
+    "error": "an approver name is 1 to 40 lowercase letters, digits or dashes",
+    "files": {
+      "name": "second",
+      "private_key": "approver-second-key.json",
+      "public_key": "approver-second.txt"
+    }
+  },
+  "delete_step": {
+    "job_id": "claims-review-cases",
+    "step": "rule-02",
+    "record": {
+      "run_id": 41,
+      "manifest_hash": "96b8871867b15c17ffe3a6c6c8386310b9e2b43cf108abf58471b28d605da42a"
+    },
+    "want_call": {
+      "run_id": 41,
+      "record_hash": "96b8871867b15c17ffe3a6c6c8386310b9e2b43cf108abf58471b28d605da42a"
+    },
+    "feed": [
+      {
+        "data": {
+          "kind": "run.sealed",
+          "entry": {
+            "run_id": 41,
+            "job_id": "claims-review-cases",
+            "step_id": "rule-02"
+          }
+        }
+      },
+      {
+        "data": {
+          "kind": "run.deleted",
+          "entry": {
+            "format": "verdifax.run-deletion.v1",
+            "run_id": 41,
+            "job_id": "claims-review-cases",
+            "step_id": "rule-02",
+            "record_hash": "96b8871867b15c17ffe3a6c6c8386310b9e2b43cf108abf58471b28d605da42a",
+            "decided_by": "owner"
+          }
+        }
+      }
+    ],
+    "want_tombstone": {
+      "format": "verdifax.run-deletion.v1",
+      "run_id": 41,
+      "job_id": "claims-review-cases",
+      "step_id": "rule-02",
+      "record_hash": "96b8871867b15c17ffe3a6c6c8386310b9e2b43cf108abf58471b28d605da42a",
+      "decided_by": "owner"
+    },
+    "want_files": [
+      "steps/rule-02.deleted.json"
+    ],
+    "want_removed": [
+      "steps/rule-02.json"
+    ],
+    "missing_step_error": "records/claims-review-cases/steps/rule-03.json does not exist; delete-step needs the step's sealed record"
+  },
+  "request_key": {
+    "keys": {
+      "agent": {
+        "id": 7,
+        "secret": "vfx_case",
+        "signing_key": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    },
+    "rotated_to": "2222222222222222222222222222222222222222222222222222222222222222",
+    "after_rotate": {
+      "agent": {
+        "id": 7,
+        "secret": "vfx_case",
+        "signing_key": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    },
+    "after_clear": {
+      "agent": {
+        "id": 7,
+        "secret": "vfx_case"
+      }
+    }
+  },
+  "publication": {
+    "note": "A publish or unpublish acts on every record of a job but a deleted step, whose tombstone (steps/<step>.deleted.json) stands in its place.",
+    "targets": {
+      "intake": 40,
+      "rule-01": 41,
+      "rule-02": 42,
+      "verdict": 43
+    },
+    "tombstones": [
+      "rule-02"
+    ],
+    "want": [
+      "intake",
+      "rule-01",
+      "verdict"
+    ]
+  },
+  "verify_commands": {
+    "note": "The account-policy check of a verdict passes its sign-offs once they exist; before, it is printed with the reason it exits 4.",
+    "job_id": "job-1",
+    "without_signoffs": [
+      "  verdifax-verify --account-policy POLICY records/job-1/steps/verdict.json",
+      "  SIGNOFF_PENDING_REASON"
+    ],
+    "with_signoffs": [
+      "  verdifax-verify --account-policy POLICY --signoff records/job-1/signoffs.json --approver-key approver.txt records/job-1/steps/verdict.json"
+    ]
+  }
+}

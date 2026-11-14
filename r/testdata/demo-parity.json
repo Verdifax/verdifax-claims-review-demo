@@ -17,7 +17,8 @@
     "review": {
       "flags": [
         "--model",
-        "--answers"
+        "--answers",
+        "--without-actor"
       ],
       "env": [
         "ANTHROPIC_API_KEY"
@@ -41,7 +42,8 @@
     "sign-off": {
       "flags": [
         "--note",
-        "--receipt"
+        "--receipt",
+        "--approver"
       ],
       "env": [],
       "writes": [
@@ -67,6 +69,77 @@
       "writes": [
         "records/<job_id>/published.json",
         "records/stopped-<run_id>/published.json"
+      ]
+    },
+    "approver-add": {
+      "flags": [],
+      "env": [],
+      "writes": [
+        "approver-<name>-key.json",
+        "approver-<name>.txt",
+        "approvers.json"
+      ]
+    },
+    "approver-revoke": {
+      "flags": [],
+      "env": [],
+      "writes": [
+        "approvers.json"
+      ]
+    },
+    "settings": {
+      "flags": [],
+      "env": [],
+      "writes": []
+    },
+    "request-key-rotate": {
+      "flags": [],
+      "env": [],
+      "writes": [
+        "demo-keys.json"
+      ]
+    },
+    "request-key-clear": {
+      "flags": [],
+      "env": [],
+      "writes": [
+        "demo-keys.json"
+      ]
+    },
+    "key-revoke": {
+      "flags": [],
+      "env": [],
+      "writes": [
+        "account-keys.json"
+      ]
+    },
+    "delete-step": {
+      "flags": [],
+      "env": [],
+      "writes": [
+        "records/<job_id>/steps/<step>.deleted.json (the step's tombstone, from the account feed, replacing records/<job_id>/steps/<step>.json)"
+      ]
+    },
+    "webhook-subscribe": {
+      "flags": [],
+      "env": [],
+      "writes": [
+        "webhook.json (0600: the subscription and its secret, shown once)"
+      ]
+    },
+    "webhook-list": {
+      "flags": [],
+      "env": [],
+      "writes": [
+        "webhooks.json",
+        "webhook-deliveries.json"
+      ]
+    },
+    "webhook-remove": {
+      "flags": [],
+      "env": [],
+      "writes": [
+        "webhook-removed.json (the server's answer with the sealed webhook.deleted record; webhook.json is kept, its secret published only after this)"
       ]
     },
     "feed": {
@@ -122,14 +195,29 @@
     "stopped_folder_prefix": "stopped-",
     "answers_folder": "answers",
     "traces_folder": "traces",
-    "policy_file": "claims-review-v3.json",
+    "policy_file": "claims-review-v4.json",
     "route_claims": "claims-review/v1/claims",
     "claims_prompt": "claims-prompt-v1.txt",
     "verdict_prompt": "verdict-prompt-v1.txt",
     "deleted_step_suffix": ".deleted.json",
     "saved_head_max_age": "168h",
     "history_age_reason": "(168h: a saved history is checked as of when it was fetched; raise the limit for an older copy, or run sign-off again to fetch it fresh)",
-    "feed_age_reason": "(168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh)"
+    "feed_age_reason": "(168h: a saved feed is checked as of when it was fetched; raise the limit for an older copy, or run feed again to fetch it fresh)",
+    "rule_set_sha256": "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98ae7",
+    "data_quality_checks": [
+      "draft_unchanged",
+      "rule_set_pinned"
+    ],
+    "data_quality_source": "claims-review draft and rule set",
+    "account_settings": [
+      "owner-replacement",
+      "verdifax-deletion"
+    ],
+    "setting_values": [
+      "allowed",
+      "blocked"
+    ],
+    "signoff_pending_reason": "(exit 4, ANCHORED, SIGN-OFF NOT SHOWN, until a sign-off is given: the policy requires one on the verdict; run sign-off, then verify-commands again)"
   },
   "steps": {
     "intake": "intake",
@@ -201,6 +289,10 @@
     ]
   },
   "attested_context": {
+    "intake": [
+      "attested",
+      "actor_id"
+    ],
     "claims": [
       "attested",
       "actor_id",
@@ -268,6 +360,9 @@
     "policy/claims-review-v1.json": "0c5c2e87bd93b6673add343c16bfb0417949630da8d5cade2ac5c130adc2208c",
     "policy/claims-review-v2.json": "aa5ad832eca29aa2d9ebba7bd19807278072d9574a10b442ff23637bfc7f84e0",
     "policy/claims-review-v3.json": "2b59b1724a4092db354b53cbcef7399ee9a32d8f594d65e877d57b52d8eb2cc3",
+    "policy/claims-review-v4.json": "b9ebbc35981bf6efa81230311457cd0a910822b11997ed44fcf4c21912a886ca",
+    "samples/budget-over-daily-limit.md": "e2c1385cd0a113f8b081589b1aa3ec79ddf7927ba0a50bbba1d513a192ce0fed",
+    "samples/budget-over-run-limit.md": "cd7b4ae48114fc55ef94df81ebf1c0f17f77a1ac5497aea52177dadfb9d4ebe0",
     "samples/clean-release-notes.md": "8db819ae649d022e31e874b99efd6c904998be3340021fe0087870a834a9d79a",
     "samples/clean-sales-email.md": "4f8b28f36caaa97e3d71c5f1c9c40c1ee393fced730fad3305d79d64c9f8ff56",
     "samples/confidential-board-memo.md": "bfe20c658d69cf30d9dade02b50f8d7aabc18913b1a3a65cda616e17633d6d6f",
@@ -275,5 +370,29 @@
     "samples/fails-rule-03-patented.md": "554860d1c096c5965988eb2dc85f27314a3476ef846f01b9f28be65908f9ac74",
     "samples/fails-rule-11-leading.md": "15f40d85cc250f9c1e5a495a7abf771e3e4dc0765e7ea6d63922942da1a1907f"
   },
-  "note_input_sha256": "Every file in samples/ and policy/, with the SHA-256 shasum -a 256 prints for it. Each program's reader must return exactly these bytes, so a sealed draft or policy hash matches the file (R170)."
+  "note_input_sha256": "Every file in samples/ and policy/, with the SHA-256 shasum -a 256 prints for it. Each program's reader must return exactly these bytes, so a sealed draft or policy hash matches the file (R170).",
+  "request_substance": {
+    "note": "Every step that called a model declares the model's own usage report for that call, so the server's per-run and per-account budgets count real tokens; the gate step calls no model and sends no request_substance.",
+    "cost": [
+      "input_tokens",
+      "output_tokens",
+      "total_tokens"
+    ]
+  },
+  "policy_context": {
+    "note": "Every step declares the draft's classification and its data checks: draft_unchanged (the draft re-read and re-hashed equals the hash sealed at intake) and rule_set_pinned (the rule set's hash equals rule_set_sha256), each pass or fail as computed, with as_of the time the draft was read.",
+    "fields": [
+      "object_type",
+      "object_id",
+      "classification",
+      "data_quality"
+    ],
+    "data_quality": [
+      "source",
+      "as_of",
+      "checks",
+      "name",
+      "result"
+    ]
+  }
 }

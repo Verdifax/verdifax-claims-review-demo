@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import {
   canonical, DELETED_STEP_SUFFIX, deletedSteps, draftClassification, FEED_AGE_REASON, HISTORY_AGE_REASON, loadRules, MIN_VERIFIER, printVerifyCommands,
   MODEL_RETRY_TRIES, readInput, RULE_SET, SAVED_HEAD_MAX_AGE, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
+  approverFiles, approverNameError, clientFor, DATA_QUALITY_CHECKS, DATA_QUALITY_SOURCE, dataQuality, POLICY_FILE, REPO, replaceWithTombstone, RULE_SET_SHA256,
+  settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON,
 } from "../claims-review.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -182,4 +184,124 @@ test("every printed re-check of a saved history or feed states its head age limi
   assert.equal(SAVED_HEAD_MAX_AGE, PARITY.constants.saved_head_max_age);
   assert.equal(HISTORY_AGE_REASON, PARITY.constants.history_age_reason);
   assert.equal(FEED_AGE_REASON, PARITY.constants.feed_age_reason);
+});
+
+// Round 62: the cases every language runs for the every-capability demo.
+const USAGE = JSON.parse(readFileSync(join(HERE, "..", "..", "testdata", "usage-cases.json"), "utf8"));
+const QUALITY = JSON.parse(readFileSync(join(HERE, "..", "..", "testdata", "data-quality-cases.json"), "utf8"));
+const COMMANDS = JSON.parse(readFileSync(join(HERE, "..", "..", "testdata", "command-cases.json"), "utf8"));
+
+test("usage is declared for every model step", () => {
+  for (const c of USAGE.cases) {
+    const got = usageSubstance(c.usage);
+    assert.deepEqual(got, c.want, c.name);
+    assert.equal(got === null ? null : canonical(got), c.want_canonical, c.name);
+  }
+});
+
+test("the data checks are computed", () => {
+  assert.equal(RULE_SET_SHA256, QUALITY.rule_set_sha256);
+  assert.equal(RULE_SET_SHA256, PARITY.constants.rule_set_sha256);
+  assert.deepEqual(DATA_QUALITY_CHECKS, PARITY.constants.data_quality_checks);
+  assert.equal(DATA_QUALITY_SOURCE, PARITY.constants.data_quality_source);
+  for (const c of QUALITY.cases) {
+    const got = dataQuality(c.intake_draft_sha256, c.draft_sha256_now, c.rule_set_hash, QUALITY.as_of);
+    assert.deepEqual(got, c.want, c.name);
+    assert.equal(canonical(got), c.want_canonical, c.name);
+  }
+});
+
+test("the loaded rule set is the pinned one", () => {
+  assert.equal(loadRules().ruleSetHash, RULE_SET_SHA256);
+});
+
+test("the policy is v4", () => {
+  assert.equal(POLICY_FILE, PARITY.constants.policy_file);
+  const policy = JSON.parse(readFileSync(join(REPO, "policy", POLICY_FILE), "utf8"));
+  assert.deepEqual(policy.required_attested_fields, ["actor_id"]);
+});
+
+test("settings are checked before sending", () => {
+  for (const [setting, value] of COMMANDS.settings.valid) assert.equal(settingError(setting, value), null);
+  for (const c of COMMANDS.settings.invalid) assert.equal(settingError(...c.args), c.error);
+});
+
+test("approver names and files", () => {
+  for (const name of COMMANDS.approver_names.valid) assert.equal(approverNameError(name), null, name);
+  for (const name of COMMANDS.approver_names.invalid) assert.equal(approverNameError(name), COMMANDS.approver_names.error, name);
+  const f = COMMANDS.approver_names.files;
+  assert.deepEqual(approverFiles(f.name), [f.private_key, f.public_key]);
+});
+
+test("the agent's request key in the keys file", () => {
+  const c = COMMANDS.request_key;
+  assert.deepEqual(withAgentSigningKey(c.keys, c.rotated_to), c.after_rotate);
+  assert.deepEqual(withAgentSigningKey(c.keys, null), c.after_clear);
+  assert.ok(clientFor(c.after_clear.agent), "a key whose request key was cleared still makes a client, which sends unsigned");
+});
+
+test("a deleted step is replaced by its tombstone", () => {
+  const c = COMMANDS.delete_step;
+  assert.deepEqual(deletedSteps(c.feed, c.job_id)[c.step], c.want_tombstone);
+  const folder = mkdtempSync(join(tmpdir(), "claims-review-"));
+  try {
+    mkdirSync(join(folder, "steps"));
+    writeFileSync(join(folder, "steps", `${c.step}.json`), JSON.stringify(c.record));
+    replaceWithTombstone(folder, c.step, c.want_tombstone);
+    for (const f of c.want_files) assert.deepEqual(JSON.parse(readFileSync(join(folder, f), "utf8")), c.want_tombstone);
+    for (const f of c.want_removed) assert.ok(!readdirSync(join(folder, "steps")).includes(f.split("/").pop()), f);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("delete-step needs the step's sealed record", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const c = COMMANDS.delete_step;
+  const folder = mkdtempSync(join(tmpdir(), "claims-review-"));
+  try {
+    const run = spawnSync(process.execPath, [join(HERE, "..", "claims-review.mjs"), "delete-step", c.job_id, "rule-03"], { cwd: folder, encoding: "utf8" });
+    assert.equal(run.status, 1);
+    assert.ok(run.stderr.includes(c.missing_step_error), run.stderr);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("publication skips a deleted step", () => {
+  const c = COMMANDS.publication;
+  const folder = mkdtempSync(join(tmpdir(), "claims-review-"));
+  try {
+    mkdirSync(join(folder, "steps"));
+    for (const step of c.tombstones) writeFileSync(join(folder, "steps", `${step}${DELETED_STEP_SUFFIX}`), "{}");
+    assert.deepEqual(publishable(folder, c.targets), c.want);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("the account-policy check passes the sign-offs once given", (t) => {
+  const c = COMMANDS.verify_commands;
+  assert.equal(SIGNOFF_PENDING_REASON, PARITY.constants.signoff_pending_reason);
+  const policy = join(REPO, "policy", POLICY_FILE);
+  const want = (lines) => lines.map((l) => l.replace("POLICY", policy).replace("SIGNOFF_PENDING_REASON", SIGNOFF_PENDING_REASON));
+  const folder = mkdtempSync(join(tmpdir(), "claims-review-"));
+  const here = process.cwd();
+  const printed = () => {
+    const lines = [];
+    t.mock.method(console, "log", (line) => lines.push(line));
+    printVerifyCommands(c.job_id);
+    t.mock.restoreAll();
+    return lines.filter((l) => l.includes("--account-policy ") || l === `  ${SIGNOFF_PENDING_REASON}`);
+  };
+  try {
+    process.chdir(folder);
+    mkdirSync(join("records", c.job_id, "steps"), { recursive: true });
+    assert.deepEqual(printed(), want(c.without_signoffs));
+    writeFileSync(join("records", c.job_id, "signoffs.json"), "[]");
+    assert.deepEqual(printed(), want(c.with_signoffs));
+  } finally {
+    process.chdir(here);
+    rmSync(folder, { recursive: true, force: true });
+  }
 });

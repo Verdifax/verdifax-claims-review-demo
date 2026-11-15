@@ -742,17 +742,25 @@ function writeDeletedSteps(folder, deleted) {
 }
 
 // The account's whole feed, read with the feed key, page by page.
-async function readAccountFeed(keys) {
+// The account's whole feed, read with the feed key, page by page, as one
+// page: every event, and the head statement the last page carries, so a saved
+// feed is checked complete up to its head (R252).
+async function readAccountFeedPage(keys) {
   const feed = new VerdifaxClient({ baseURL: baseURL(), apiKey: keys.feed.secret });
   const events = [];
   let after = 0;
+  let page;
   for (;;) {
-    const page = await feed.getSignals({ after, limit: 500 });
+    page = await feed.getSignals({ after, limit: 500 });
     events.push(...page.events);
     if (page.events.length < 500) break;
     after = page.next_after;
   }
-  return events;
+  return page.head ? { events, head: page.head } : { events };
+}
+
+async function readAccountFeed(keys) {
+  return (await readAccountFeedPage(keys)).events;
 }
 
 // The re-check of a saved sign-off history or feed, with its head age limit,
@@ -993,8 +1001,9 @@ async function publication(jobId, receipt, publish) {
 }
 
 async function cmdFeed() {
-  const events = await readAccountFeed(loadKeys());
-  writeJSON("signals.json", events);
+  const page = await readAccountFeedPage(loadKeys());
+  writeJSON("signals.json", page);
+  const events = page.events;
   const kinds = {};
   for (const e of events) kinds[e.data.kind] = (kinds[e.data.kind] || 0) + 1;
   console.log(`${events.length} events in the feed: ${Object.keys(kinds).sort().map((k) => `${k} ${kinds[k]}`).join(", ")}`);

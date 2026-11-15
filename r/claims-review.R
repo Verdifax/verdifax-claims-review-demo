@@ -784,7 +784,10 @@ write_deleted_steps <- function(folder, deleted) {
 }
 
 # The account's whole feed, read with the feed key, page by page.
-read_account_feed <- function(keys) {
+# The account's whole feed, read with the feed key, page by page, as one
+# page: every event, and the head statement the last page carries, so a saved
+# feed is checked complete up to its head (R252).
+read_account_feed_page <- function(keys) {
   feed <- verdifax_client(base_url = base_url(), api_key = keys$feed$secret)
   events <- list()
   after <- 0
@@ -794,8 +797,12 @@ read_account_feed <- function(keys) {
     if (length(page$events) < 500) break
     after <- page$next_after
   }
-  events
+  out <- list(events = events)
+  if (!is.null(page$head)) out$head <- page$head
+  out
 }
+
+read_account_feed <- function(keys) read_account_feed_page(keys)$events
 
 # The re-check of a saved sign-off history or feed, with its head age limit,
 # and the reason for the limit on the line after (R246).
@@ -912,8 +919,9 @@ cmd_publication <- function(job_id, receipt, publish) {
 }
 
 cmd_feed <- function() {
-  events <- read_account_feed(load_keys())
-  write_json("signals.json", events)
+  page <- read_account_feed_page(load_keys())
+  write_json("signals.json", page)
+  events <- page$events
   kinds <- table(vapply(events, function(e) e$data$kind, character(1)))
   cat(sprintf("%d events in the feed: %s\n", length(events), paste(sprintf("%s %d", names(kinds), as.integer(kinds)), collapse = ", ")))
   feed <- feed_check()

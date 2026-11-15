@@ -1145,23 +1145,38 @@ func writeDeletedSteps(folder string, deleted map[string]json.RawMessage) {
 	}
 }
 
-// readAccountFeed is the account's whole feed, read with the feed key, page
-// by page.
-func readAccountFeed(ctx context.Context, keys keyFile) []verdifax.SignalEvent {
+// savedFeed is the account's whole feed as one page: every event, and the
+// head statement the last page carries, so a saved feed is checked complete
+// up to its head (R252).
+type savedFeed struct {
+	Events []verdifax.SignalEvent `json:"events"`
+	Head   *verdifax.FeedHead     `json:"head,omitempty"`
+}
+
+// readAccountFeedPage is the account's whole feed, read with the feed key,
+// page by page.
+func readAccountFeedPage(ctx context.Context, keys keyFile) savedFeed {
 	feed, newErr := verdifax.NewClient(verdifax.Config{BaseURL: baseURL(), APIKey: keys.Feed.Secret})
 	must(newErr)
-	events := []verdifax.SignalEvent{}
+	out := savedFeed{Events: []verdifax.SignalEvent{}}
 	var after int64
 	for {
 		page, pageErr := feed.GetSignals(ctx, &verdifax.GetSignalsOptions{After: after, Limit: 500})
 		must(pageErr)
-		events = append(events, page.Events...)
+		out.Events = append(out.Events, page.Events...)
+		out.Head = page.Head
 		if len(page.Events) < 500 {
 			break
 		}
 		after = page.NextAfter
 	}
-	return events
+	return out
+}
+
+// readAccountFeed is the account's whole feed, read with the feed key, page
+// by page.
+func readAccountFeed(ctx context.Context, keys keyFile) []verdifax.SignalEvent {
+	return readAccountFeedPage(ctx, keys).Events
 }
 
 // historyCheck is the re-check of a saved sign-off history, with its head
@@ -1368,8 +1383,9 @@ func cmdPublication(ctx context.Context, jobID, receipt string, publish bool) {
 }
 
 func cmdFeed(ctx context.Context) {
-	events := readAccountFeed(ctx, loadKeys())
-	writeJSON("signals.json", events)
+	page := readAccountFeedPage(ctx, loadKeys())
+	writeJSON("signals.json", page)
+	events := page.Events
 	kinds := map[string]int{}
 	for _, e := range events {
 		kinds[e.Data.Kind]++

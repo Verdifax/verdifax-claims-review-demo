@@ -758,8 +758,10 @@ def write_deleted_steps(folder: Path, deleted: dict[str, Any]) -> None:
         write_json(folder / "steps" / ("%s%s" % (step, DELETED_STEP_SUFFIX)), entry)
 
 
-def read_account_feed(keys: dict[str, Any]) -> list[Any]:
-    """The account's whole feed, read with the feed key, page by page."""
+def read_account_feed_page(keys: dict[str, Any]) -> dict[str, Any]:
+    """The account's whole feed, read with the feed key, page by page, as one
+    page: every event, and the head statement the last page carries, so a
+    saved feed is checked complete up to its head (R252)."""
     feed = verdifax.VerdifaxClient(base_url=base_url(), api_key=keys["feed"]["secret"])
     events: list[Any] = []
     after = 0
@@ -769,7 +771,15 @@ def read_account_feed(keys: dict[str, Any]) -> list[Any]:
         if len(page["events"]) < 500:
             break
         after = page["next_after"]
-    return events
+    out: dict[str, Any] = {"events": events}
+    if page.get("head"):
+        out["head"] = page["head"]
+    return out
+
+
+def read_account_feed(keys: dict[str, Any]) -> list[Any]:
+    """The account's whole feed, read with the feed key, page by page."""
+    return read_account_feed_page(keys)["events"]
 
 
 def history_check(path: Path) -> tuple[str, str]:
@@ -1033,8 +1043,9 @@ def cmd_unpublish(args: argparse.Namespace) -> None:
 
 
 def cmd_feed(_: argparse.Namespace) -> None:
-    events = read_account_feed(load_keys())
-    write_json(Path("signals.json"), events)
+    page = read_account_feed_page(load_keys())
+    write_json(Path("signals.json"), page)
+    events = page["events"]
     kinds: dict[str, int] = {}
     for e in events:
         kinds[e["data"]["kind"]] = kinds.get(e["data"]["kind"], 0) + 1

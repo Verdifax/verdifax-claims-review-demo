@@ -18,6 +18,8 @@
 //   claims-review setup                              owner key in VERDIFAX_OWNER_KEY
 //   claims-review review DRAFT.md [--model ID]        model key in ANTHROPIC_API_KEY
 //   claims-review review DRAFT.md --without-actor     the gate step names no agent
+//   claims-review review DRAFT.md --agent-version V   another declared agent version, for a person's sign-off
+//   claims-review review DRAFT.md --data-use-category C   another declared data category, refused at intake
 //   claims-review sign-off JOB_ID approve|reject [--note TEXT] [--approver NAME]
 //   claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT] [--approver NAME]
 //   claims-review publish JOB_ID | publish --receipt RUN_ID
@@ -29,6 +31,10 @@
 //   claims-review key-revoke [--holder]                       the owner revokes the agent key, or the holder
 //   claims-review delete-step JOB_ID STEP                     the owner deletes one step
 //   claims-review webhook-subscribe URL | webhook-list | webhook-remove
+//   claims-review account-stop [--reason TEXT] | account-resume [--reason TEXT]
+//   claims-review tool-key TOOL,TOOL                          the owner gives a key a list of tools
+//   claims-review response-times START END                    RFC 3339 times, counted from the feed
+//   claims-review summary START END                           the period's board summary, ended 15 minutes ago or more
 //   claims-review feed
 //   claims-review verify-commands JOB_ID
 //
@@ -39,7 +45,9 @@
 // approver.txt, account-history.json, records/<job_id>/*.json with payloads/,
 // signals.json; approver-<name>-key.json (0600), approver-<name>.txt and
 // approvers.json; account-keys.json; webhook.json (0600), webhooks.json and
-// webhook-deliveries.json.
+// webhook-deliveries.json; account-stop.json, account-resume.json,
+// tool-key.json (0600), response-times.json, summary.json, summary-head.json and
+// summary.pdf.
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
@@ -58,7 +66,7 @@ const ROUTE_RULE = "claims-review/v1/rule-check";
 const ROUTE_VERDICT = "claims-review/v1/verdict";
 const OBJECT_PREFIX = "claims-review/v1/";
 const LEVELS = ["PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI"];
-const MIN_VERIFIER = "v0.36.0";
+const MIN_VERIFIER = "v0.39.0";
 // Anthropic's SDKs retry a dropped connection, 408, 409, 429 and any 5xx, but
 // only twice by default, waiting half a second then one second. That is too
 // short: on November 13, 2026 a 503 from the model API outlasted it and ended
@@ -76,12 +84,15 @@ const ANSWERS_FOLDER = "answers";
 // The text the server's AI review checked for each step, as the server
 // returned it once: a reader re-runs the review's check from these files.
 const TRACES_FOLDER = "traces";
-// The account policy setup activates; v1 to v3 stay for records sealed
+// The account policy setup activates; v1 to v4 stay for records sealed
 // under them. v3 requires a reviewed AI answer on every step after the gate;
 // v4 adds that every step names its agent (required_attested_fields), that
 // each verdict needs a person's sign-off, and that every step after the gate
-// passes its declared data checks.
-const POLICY_FILE = "claims-review-v4.json";
+// passes its declared data checks; v5 adds that every step declares its data
+// use within the policy's codes, that the policy watches the agent's declared
+// version and requires a person's sign-off on a verdict from a version it has
+// not approved, its own review date, and the sign-off target its results seal.
+const POLICY_FILE = "claims-review-v5.json";
 // The rule set's pinned hash, which the rule_set_pinned data check compares.
 const RULE_SET_SHA256 = "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98ae7";
 // The data checks every step declares in policy_context.data_quality, each
@@ -89,6 +100,21 @@ const RULE_SET_SHA256 = "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66
 // sealed at intake) and rule_set_pinned (the rule set's hash is the pin).
 const DATA_QUALITY_CHECKS = ["draft_unchanged", "rule_set_pinned"];
 const DATA_QUALITY_SOURCE = "claims-review draft and rule set";
+// The data use every step declares in policy_context.data_use, in the demo's
+// own codes: Verdifax seals the declaration as made and judges none of it.
+const DATA_USE_PURPOSE = "claims.review";
+const DATA_USE_BASIS = "internal:demo";
+const DATA_USE_CATEGORY = "draft.text";
+const DATA_USE_CODE = /^[a-z0-9][a-z0-9._:-]{0,63}$/;
+// The agent's own declared name and version, sealed in attested_context as
+// declared, not verified. The policy watches them: a version it did not approve
+// is admitted only for a person's sign-off.
+const CLIENT_NAME = "claims-review";
+const CLIENT_VERSION = "5";
+const PRINTABLE_VERSION = /^[\x20-\x7e]{1,128}$/;
+// The tools an agent key may be given (verdifax-mcp's names), and account_stop.
+const GRANTABLE_TOOLS = ["account_stop", "get_record", "get_signoffs", "list_pending_signoffs", "list_records", "prepare_signoff",
+  "read_feed", "seal_decision", "test_policy", "verify_feed", "verify_record"];
 // The owner's two blocks on Verdifax, and their values.
 const ACCOUNT_SETTINGS = ["owner-replacement", "verdifax-deletion"];
 const SETTING_VALUES = ["allowed", "blocked"];
@@ -224,6 +250,27 @@ function dataQuality(intakeDraftSha256, draftSha256Now, ruleSetHash, asOf) {
       { name: DATA_QUALITY_CHECKS[1], result: result(ruleSetHash === RULE_SET_SHA256) },
     ],
   };
+}
+
+// The data use a step declares, in the demo's own codes.
+const dataUse = (category) => ({ purpose: DATA_USE_PURPOSE, basis: DATA_USE_BASIS, categories: [category] });
+
+// Why a declared data category is refused before anything is sent, or null.
+function dataUseError(category) {
+  if (DATA_USE_CODE.test(category)) return null;
+  return "the data category must be a code of 1 to 64 lowercase letters, digits, dots, underscores, colons or hyphens";
+}
+
+// Why a declared agent version is refused before anything is sent, or null.
+const clientVersionError = (version) => (PRINTABLE_VERSION.test(version) ? null : "the agent version must be 1 to 128 characters of printable ASCII");
+
+// Why a tool list is refused before anything is sent, or null.
+function toolsError(tools) {
+  if (tools.length === 0 || new Set(tools).size !== tools.length) return "name each tool once, separated by commas";
+  for (const tool of tools) {
+    if (!GRANTABLE_TOOLS.includes(tool)) return `${tool} is not a tool a key can be given: ${GRANTABLE_TOOLS.join(", ")}`;
+  }
+  return null;
 }
 
 // Why a settings command is refused before anything is sent, or null.
@@ -408,7 +455,8 @@ function utcStamp() {
   return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }
 
-async function cmdReview(draftPath, model, answersPath, withoutActor) {
+async function cmdReview(draftPath, model, answersPath, withoutActor, agentVersion, dataUseCategory) {
+  for (const problem of [dataUseError(dataUseCategory), clientVersionError(agentVersion)]) if (problem) fail(problem);
   const registryRecord = registryRecordHash(process.env.CLAIMS_REVIEW_REGISTRY_RECORD_HASH);
   const keys = loadKeys();
   const agent = clientFor(keys.agent);
@@ -425,10 +473,16 @@ async function cmdReview(draftPath, model, answersPath, withoutActor) {
   const out = join("records", jobId);
   const payloads = {};
   // The step's policy context: its object, the draft's classification and the
-  // data checks, computed again now, the draft re-read.
+  // data checks, computed again now, the draft re-read, and its data use.
   const policy = (objectId) => ({
     object_type: "text", object_id: OBJECT_PREFIX + objectId, classification: level,
     data_quality: dataQuality(draftHash, sha256Hex(readInput(draftPath)), ruleSetHash, readAt),
+    data_use: dataUse(dataUseCategory),
+  });
+  // The step's attested context: the agent, its declared name and version,
+  // and the step's own fields.
+  const attested = (fields = {}) => ({
+    attested: true, actor_id: ACTOR_ID, client_name: CLIENT_NAME, client_version: agentVersion, ...fields,
   });
 
   const intakePayload = {
@@ -444,7 +498,7 @@ async function cmdReview(draftPath, model, answersPath, withoutActor) {
       // The gate step names its agent, as policy v4 requires of every step;
       // --without-actor leaves the name out on purpose, so the policy
       // refuses the draft here, before any model is called.
-      ...(withoutActor ? {} : { attested_context: { attested: true, actor_id: ACTOR_ID } }),
+      ...(withoutActor ? {} : { attested_context: attested() }),
     });
   } catch (err) {
     if (!(err instanceof APIError)) throw err;
@@ -487,10 +541,10 @@ async function cmdReview(draftPath, model, answersPath, withoutActor) {
       after: ["intake"], payload_text: canonical(claimsPayload), program_id: PROGRAM_ID, route_id: ROUTE_CLAIMS,
       registry_record_hash: registryRecord, ai_output_text: answerTexts.claims,
       request_substance: usageSubstance({ input_tokens: listed.inputTokens, output_tokens: listed.outputTokens }),
-      attested_context: {
-        attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: listed.model, prompt_hash: claimsPromptHash,
+      attested_context: attested({
+        model_provider: "anthropic", model_name: listed.model, prompt_hash: claimsPromptHash,
         decision_kind: "claims.list", decision_result: String(listed.fields.claims.length),
-      },
+      }),
       policy_context: policy("claims"),
     });
   } catch (err) {
@@ -523,10 +577,10 @@ async function cmdReview(draftPath, model, answersPath, withoutActor) {
         after: ["claims"], payload_text: canonical(payload), program_id: PROGRAM_ID, route_id: ROUTE_RULE,
         registry_record_hash: registryRecord, ai_output_text: answerTexts[rule.id],
         request_substance: usageSubstance({ input_tokens: answer.inputTokens, output_tokens: answer.outputTokens }),
-        attested_context: {
-          attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: answer.model, prompt_hash: promptHash,
+        attested_context: attested({
+          model_provider: "anthropic", model_name: answer.model, prompt_hash: promptHash,
           decision_kind: "claims.rule_check", decision_result: answer.verdict,
-        },
+        }),
         policy_context: policy(rule.id),
       });
     } catch (err) {
@@ -570,10 +624,10 @@ async function cmdReview(draftPath, model, answersPath, withoutActor) {
       after: rules.map((r) => r.id), final: true, payload_text: canonical(verdictPayload), program_id: PROGRAM_ID,
       route_id: ROUTE_VERDICT, registry_record_hash: registryRecord, ai_output_text: answerTexts.verdict,
       request_substance: usageSubstance({ input_tokens: explained.inputTokens, output_tokens: explained.outputTokens }),
-      attested_context: {
-        attested: true, actor_id: ACTOR_ID, model_provider: "anthropic", model_name: explained.model, prompt_hash: verdictPromptHash,
+      attested_context: attested({
+        model_provider: "anthropic", model_name: explained.model, prompt_hash: verdictPromptHash,
         decision_kind: "claims.verdict", decision_result: verdict,
-      },
+      }),
       policy_context: policy("verdict"),
     });
   } catch (err) {
@@ -940,6 +994,62 @@ async function cmdWebhookList() {
   console.log(`${hooks.length} webhook(s); their deliveries are in webhook-deliveries.json`);
 }
 
+// ── the account stop, tool-listed keys, response times, board summary ──────
+// The stop, its resume and a tool-listed key are sealed in the account's feed.
+// The response-time report and the board summary are counted from that feed,
+// and verdifax-verify counts each of them again.
+
+// The owner's stop on the account, signed with the owner's request key. Every
+// new run is refused with a sealed receipt until the owner resumes.
+async function cmdAccountStop(reason) {
+  const answer = await ownerClient().stopAccount({ reason });
+  writeJSON("account-stop.json", answer.account_stop);
+  console.log("the account is stopped; the stop is sealed in the account's feed and in account-stop.json");
+}
+
+// The owner lifts the owner's stop, signed with the owner's request key.
+async function cmdAccountResume(reason) {
+  const answer = await ownerClient().resumeAccount({ reason });
+  writeJSON("account-resume.json", answer.account_stop);
+  console.log("the account runs again; the resume is sealed in the account's feed and in account-resume.json");
+}
+
+// A member key the owner gives a list of tools, sealed when the key is made;
+// the server refuses the key everything else.
+async function cmdToolKey(toolList) {
+  const tools = toolList.split(",");
+  if (toolsError(tools)) fail(toolsError(tools));
+  if (existsSync("tool-key.json")) fail("tool-key.json exists here; the tool-listed key is already made");
+  const made = await ownerClient().createAccountKey("claims-review-tools", { allowedTools: tools });
+  const signer = generateRequestKeyPair();
+  const holder = new VerdifaxClient({ baseURL: baseURL(), apiKey: made.secret, signingKey: signer.privateKey });
+  await holder.registerRequestKey();
+  const entry = { id: made.id, secret: made.secret, signing_key: signer.privateKey.toString("hex"), allowed_tools: made.allowed_tools };
+  writePrivate("tool-key.json", JSON.stringify(entry, null, 2) + "\n");
+  console.log(`key ${made.id} may use ${made.allowed_tools.join(", ")} and nothing else; its list is sealed in the account's feed`);
+}
+
+// How long each result waited for a person's sign-off, with the feed it was
+// counted from.
+async function cmdResponseTimes(start, end) {
+  writeJSON("response-times.json", await ownerClient().getResponseTimes(start, end, { pack: true }));
+  console.log(`response times for ${start} to ${end} are in response-times.json`);
+  console.log(`verify: verdifax-verify --signals response-times.json --response-times --feed-head-max-age ${SAVED_HEAD_MAX_AGE}`);
+}
+
+// The period's board summary, sealed on the public log, its head statement and
+// its PDF.
+async function cmdSummary(start, end) {
+  const owner = ownerClient();
+  const made = await owner.createSummary(start, end);
+  const number = Number(made.id);
+  writeJSON("summary.json", await owner.getSummary(number));
+  writeJSON("summary-head.json", await owner.getSummaryHead(number));
+  writeFileSync("summary.pdf", await owner.downloadSummaryReport(number));
+  console.log(`board summary ${number} for ${start} to ${end} is in summary.json, with its head statement and summary.pdf`);
+  console.log(`verify, after \`feed\`: verdifax-verify --summary summary.json --summary-head summary-head.json --signals signals.json --feed-head-max-age ${SAVED_HEAD_MAX_AGE}`);
+}
+
 // ── feed ───────────────────────────────────────────────────────────────────
 
 // ── publish ────────────────────────────────────────────────────────────────
@@ -1060,10 +1170,12 @@ async function main() {
     case "review": {
       const model = option(args, "--model") || DEFAULT_MODEL;
       const answers = option(args, "--answers");
+      const agentVersion = option(args, "--agent-version") ?? CLIENT_VERSION;
+      const dataUseCategory = option(args, "--data-use-category") ?? DATA_USE_CATEGORY;
       const withoutActor = args.includes("--without-actor");
       if (withoutActor) args.splice(args.indexOf("--without-actor"), 1);
       if (args.length !== 1) fail("review takes one draft file");
-      return cmdReview(args[0], model, answers, withoutActor);
+      return cmdReview(args[0], model, answers, withoutActor, agentVersion, dataUseCategory);
     }
     case "sign-off": {
       const note = option(args, "--note");
@@ -1111,13 +1223,26 @@ async function main() {
       return cmdWebhookList();
     case "webhook-remove":
       return cmdWebhookRemove();
+    case "account-stop":
+    case "account-resume": {
+      const reason = option(args, "--reason");
+      if (args.length !== 0) fail(`${command} takes only --reason TEXT`);
+      return command === "account-stop" ? cmdAccountStop(reason) : cmdAccountResume(reason);
+    }
+    case "tool-key":
+      if (args.length !== 1) fail("tool-key takes the TOOLS the key may use, separated by commas");
+      return cmdToolKey(args[0]);
+    case "response-times":
+    case "summary":
+      if (args.length !== 2) fail(`${command} takes a START and an END, RFC 3339 times`);
+      return command === "response-times" ? cmdResponseTimes(args[0], args[1]) : cmdSummary(args[0], args[1]);
     case "feed":
       return cmdFeed();
     case "verify-commands":
       if (args.length !== 1) fail("verify-commands takes a JOB_ID");
       return printVerifyCommands(args[0]);
     default:
-      fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-register KEY_FILE, request-key-rotate [--holder], request-key-clear [--holder], key-revoke [--holder], delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID");
+      fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-register KEY_FILE, request-key-rotate [--holder], request-key-clear [--holder], key-revoke [--holder], delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, account-stop [--reason TEXT], account-resume [--reason TEXT], tool-key TOOL,TOOL, response-times START END, summary START END, feed, verify-commands JOB_ID");
   }
 }
 
@@ -1126,6 +1251,7 @@ export {
   MODEL_RETRY_TRIES, readInput, RULE_SET, SAVED_HEAD_MAX_AGE, sha256Hex, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
   approverFiles, approverNameError, clientFor, DATA_QUALITY_CHECKS, DATA_QUALITY_SOURCE, dataQuality, POLICY_FILE, REPO, replaceWithTombstone, RULE_SET_SHA256,
   settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON, recordedUsage, withSigningKey, keyFor, registryRecordHash, REGISTRY_RECORD_HASH, isLocalServer,
+  CLIENT_NAME, CLIENT_VERSION, clientVersionError, DATA_USE_CATEGORY, DATA_USE_PURPOSE, dataUse, dataUseError, GRANTABLE_TOOLS, toolsError,
 };
 
 // Node loads the program by its real path, so the path it was started with is

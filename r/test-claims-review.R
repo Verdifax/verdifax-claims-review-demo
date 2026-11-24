@@ -161,10 +161,107 @@ for (c in quality_cases$cases) {
   check(identical(canonical(got), c$want_canonical), paste("data checks computed:", c$name))
 }
 check(identical(load_rules()$rule_set_hash, RULE_SET_SHA256), "the loaded rule set is the pinned one")
-policy_v4 <- jsonlite::fromJSON(file.path(REPO, "policy", POLICY_FILE), simplifyVector = FALSE)
-check(identical(POLICY_FILE, constants$policy_file) && identical(unlist(policy_v4$required_attested_fields), "actor_id"), "the policy is v4")
+policy_v5 <- jsonlite::fromJSON(file.path(REPO, "policy", POLICY_FILE), simplifyVector = FALSE)
+conditions_of <- function(type) Filter(function(c) identical(c$type, type), unlist(lapply(policy_v5$rules, function(r) r$conditions), recursive = FALSE))
+uses <- conditions_of("data_use")
+approved <- unlist(lapply(conditions_of("attested_setup"), function(c) c$facts), recursive = FALSE)
+check(identical(POLICY_FILE, constants$policy_file) && identical(unlist(policy_v5$required_attested_fields), "actor_id") &&
+        identical(unlist(policy_v5$watch_setup$fields), c("client_name", "client_version")) && length(uses) == 4 &&
+        all(vapply(uses, function(u) identical(u$purpose_match$value, DATA_USE_PURPOSE) && identical(u$categories_allowed, list(DATA_USE_CATEGORY)), logical(1))) &&
+        identical(lapply(approved, function(f) list(f$fact, f$match$value)), list(list("client_version", CLIENT_VERSION))),
+      "the policy is v5")
 
 command_cases <- jsonlite::fromJSON(file.path(REPO, "testdata", "command-cases.json"), simplifyVector = FALSE)
+# The data use a step declares, the agent's declared version and a key's tools.
+check(identical(data_use(DATA_USE_CATEGORY), list(purpose = constants$data_use_purpose, basis = constants$data_use_basis,
+                                                  categories = list(constants$data_use_category))) &&
+        identical(c(CLIENT_NAME, CLIENT_VERSION), c(constants$client_name, constants$client_version)) &&
+        identical(GRANTABLE_TOOLS, unlist(constants$grantable_tools)),
+      "the data use, the agent's name and version and the tools match the parity file")
+for (case in list(list("data_use_categories", data_use_error), list("agent_versions", client_version_error))) {
+  cases <- command_cases[[case[[1]]]]
+  check(length(cases$valid) > 0 && length(cases$invalid) > 0 &&
+          all(vapply(cases$valid, function(v) is.null(case[[2]](v)), logical(1))) &&
+          all(vapply(cases$invalid, function(v) identical(case[[2]](v), cases$error), logical(1))),
+        paste("checked before sending:", case[[1]]))
+}
+tool_cases <- command_cases$tool_lists
+check(all(vapply(tool_cases$valid, function(t) is.null(tools_error(tool_list(t))), logical(1))) &&
+        all(vapply(tool_cases$invalid, function(c) startsWith(tools_error(tool_list(c$tools)), c$error), logical(1))),
+      "checked before sending: tool_lists")
+# The bytes a step sends: one category stays a JSON array, and the SDK accepts
+# the declared data use.
+sent <- as.character(jsonlite::toJSON(policy_context("intake", "INTERNAL", list(), data_use(DATA_USE_CATEGORY)), auto_unbox = TRUE))
+check(grepl('"data_use":{"purpose":"claims.review","basis":"internal:demo","categories":["draft.text"]}', sent, fixed = TRUE) &&
+        identical(verdifax_validate_data_use(data_use(DATA_USE_CATEGORY)), data_use(DATA_USE_CATEGORY)),
+      "one data category is sent as a JSON array")
+# Every attested context names the fields the parity file lists, in order.
+with_model <- attested(CLIENT_VERSION, model_provider = "p", model_name = "m", prompt_hash = "h", decision_kind = "k", decision_result = "r")
+check(identical(names(attested(CLIENT_VERSION)), unlist(parity$attested_context$intake)) &&
+        identical(names(with_model), unlist(parity$attested_context$rule)),
+      "the attested context names the agent's declared name and version")
+# A bad category or version is refused before the keys file is even read.
+bad_dir <- tempfile("claims-review-")
+dir.create(bad_dir)
+old_wd <- setwd(bad_dir)
+bad_category <- failure_of(cmd_review("none.md", DEFAULT_MODEL, NULL, data_use_category = "Draft"))
+bad_version <- failure_of(cmd_review("none.md", DEFAULT_MODEL, NULL, agent_version = ""))
+bad_tools <- failure_of(cmd_tool_key("seal_decision,"))
+# The new commands against stand-ins for the SDK's calls: the files and the
+# text they hold.
+stop_record <- list(format = "verdifax.account-stop.v1", action = "stop", sequence = 3000000000, scope = list(signoffs = "accept"))
+real <- mget(c("owner_client", "verdifax_register_request_key"), envir = globalenv(), inherits = TRUE)
+owner_client <- function() "owner"
+verdifax_register_request_key <- function(client) NULL
+# A stand-in key, so this machine needs no signing package for the test.
+verdifax_generate_request_key <- function() list(private_key = as.raw(rep(7, 32)), public_key = as.raw(rep(9, 32)))
+verdifax_client <- function(...) list(...)
+reasons <- list()
+verdifax_stop_account <- function(client, reason) { reasons[["stop"]] <<- reason; list(account_stop = stop_record) }
+verdifax_resume_account <- function(client, reason) { reasons[["resume"]] <<- list(reason); list(account_stop = stop_record) }
+verdifax_create_account_key <- function(client, name, allowed_tools) list(id = 12L, secret = "vfx_case", allowed_tools = as_list(sort(allowed_tools)))
+verdifax_get_response_times <- function(client, from, to, pack) if (isTRUE(pack)) '{"from":"a","wait":1.10}\n' else ""
+verdifax_create_summary <- function(client, from, to) list(id = 4L)
+verdifax_get_summary <- function(client, id) sprintf('{"summary":%d,"share":0.10}', id)
+verdifax_get_summary_head <- function(client, id) sprintf('{"head":%d}', id)
+verdifax_download_summary_report <- function(client, id) charToRaw("%PDF-1.7")
+said <- capture.output({
+  cmd_account_stop("a reason")
+  cmd_account_resume(NULL)
+  cmd_tool_key("seal_decision")
+  cmd_response_times("S", "E")
+  cmd_summary("S", "E")
+})
+tool_key <- jsonlite::fromJSON("tool-key.json", simplifyVector = FALSE)
+tool_mode <- format(file.info("tool-key.json")$mode)
+second_key <- failure_of(cmd_tool_key("seal_decision"))
+kept_stop <- jsonlite::fromJSON("account-stop.json", simplifyVector = FALSE)
+kept_texts <- vapply(c("response-times.json", "summary.json", "summary-head.json", "summary.pdf"), read_text, "", USE.NAMES = FALSE)
+resumed <- file.exists("account-resume.json")
+setwd(old_wd)
+unlink(bad_dir, recursive = TRUE)
+owner_client <- real$owner_client
+rm(verdifax_register_request_key, verdifax_generate_request_key, verdifax_client)
+check(identical(bad_category, command_cases$data_use_categories$error) && identical(bad_version, command_cases$agent_versions$error) &&
+        startsWith(bad_tools, " is not a tool a key can be given: "), "a bad category, version or tool list is refused before anything is sent")
+check(identical(reasons, list(stop = "a reason", resume = list(NULL))) && identical(kept_stop, stop_record) && resumed, "the sealed stop and resume are kept")
+check(identical(tool_key[c("id", "secret", "allowed_tools")], list(id = 12L, secret = "vfx_case", allowed_tools = list("seal_decision"))) &&
+        nchar(tool_key$signing_key) == 64 && identical(tool_mode, "600") &&
+        identical(second_key, "tool-key.json exists here; the tool-listed key is already made"),
+      "the tool-listed key is kept private with its list")
+check(identical(kept_texts, c('{"from":"a","wait":1.10}\n', '{"summary":4,"share":0.10}', '{"head":4}', "%PDF-1.7")),
+      "the report, the summary and its head keep the server's exact text")
+check(identical(said, c(
+  "the account is stopped; the stop is sealed in the account's feed and in account-stop.json",
+  "the account runs again; the resume is sealed in the account's feed and in account-resume.json",
+  "key 12 may use seal_decision and nothing else; its list is sealed in the account's feed",
+  "response times for S to E are in response-times.json",
+  "verify: verdifax-verify --signals response-times.json --response-times --feed-head-max-age 168h",
+  "board summary 4 for S to E is in summary.json, with its head statement and summary.pdf",
+  "verify, after `feed`: verdifax-verify --summary summary.json --summary-head summary-head.json --signals signals.json --feed-head-max-age 168h")),
+  "the new commands print what every language prints")
+check(all(vapply(setdiff(names(parity$commands), "setup"), function(n) grepl(n, COMMANDS_HELP, fixed = TRUE), logical(1))), "the help text names every command")
+
 check(all(vapply(command_cases$settings$valid, function(v) is.null(setting_error(v[[1]], v[[2]])), logical(1))) &&
         all(vapply(command_cases$settings$invalid, function(v) identical(setting_error(v$args[[1]], v$args[[2]]), v$error), logical(1))),
       "settings are checked before sending")

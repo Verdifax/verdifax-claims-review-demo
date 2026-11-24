@@ -11,6 +11,7 @@ import {
   MODEL_RETRY_TRIES, readInput, RULE_SET, SAVED_HEAD_MAX_AGE, STOP_KINDS, STOP_RECEIPT_FIELDS, stopReceipt, stopReceiptHash, stoppedRun, writeDeletedSteps,
   approverFiles, approverNameError, clientFor, DATA_QUALITY_CHECKS, DATA_QUALITY_SOURCE, dataQuality, POLICY_FILE, REPO, replaceWithTombstone, RULE_SET_SHA256,
   settingError, usageSubstance, withAgentSigningKey, publishable, SIGNOFF_PENDING_REASON, recordedUsage, withSigningKey, keyFor, registryRecordHash, REGISTRY_RECORD_HASH, isLocalServer, sha256Hex,
+  CLIENT_NAME, CLIENT_VERSION, clientVersionError, DATA_USE_CATEGORY, DATA_USE_PURPOSE, dataUse, dataUseError, GRANTABLE_TOOLS, toolsError,
 } from "../claims-review.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -218,10 +219,59 @@ test("the loaded rule set is the pinned one", () => {
   assert.equal(loadRules().ruleSetHash, RULE_SET_SHA256);
 });
 
-test("the policy is v4", () => {
+test("the policy is v5", () => {
   assert.equal(POLICY_FILE, PARITY.constants.policy_file);
   const policy = JSON.parse(readFileSync(join(REPO, "policy", POLICY_FILE), "utf8"));
   assert.deepEqual(policy.required_attested_fields, ["actor_id"]);
+  assert.deepEqual(policy.watch_setup.fields, ["client_name", "client_version"]);
+  const conditions = policy.rules.flatMap((rule) => rule.conditions || []);
+  const uses = conditions.filter((c) => c.type === "data_use");
+  assert.equal(uses.length, 4);
+  for (const use of uses) {
+    assert.equal(use.purpose_match.value, DATA_USE_PURPOSE);
+    assert.deepEqual(use.categories_allowed, [DATA_USE_CATEGORY]);
+  }
+  const approved = conditions.filter((c) => c.type === "attested_setup").flatMap((c) => c.facts);
+  assert.deepEqual(approved.map((f) => [f.fact, f.match.value]), [["client_version", CLIENT_VERSION]]);
+});
+
+test("data use, agent versions and tool lists", () => {
+  const constants = PARITY.constants;
+  assert.deepEqual(dataUse(DATA_USE_CATEGORY), {
+    purpose: constants.data_use_purpose, basis: constants.data_use_basis, categories: [constants.data_use_category],
+  });
+  assert.deepEqual(Object.keys(dataUse(DATA_USE_CATEGORY)), PARITY.policy_context.data_use);
+  assert.deepEqual([CLIENT_NAME, CLIENT_VERSION], [constants.client_name, constants.client_version]);
+  assert.deepEqual(GRANTABLE_TOOLS, constants.grantable_tools);
+  for (const [name, check] of [["data_use_categories", dataUseError], ["agent_versions", clientVersionError]]) {
+    for (const value of COMMANDS[name].valid) assert.equal(check(value), null, value);
+    for (const value of COMMANDS[name].invalid) assert.equal(check(value), COMMANDS[name].error, value);
+  }
+  for (const tools of COMMANDS.tool_lists.valid) assert.equal(toolsError(tools.split(",")), null, tools);
+  for (const c of COMMANDS.tool_lists.invalid) {
+    const error = toolsError(c.tools.split(","));
+    assert.ok(error !== null && error.startsWith(c.error), c.tools);
+  }
+});
+
+test("a refused flag or tool list ends the program before anything is read or sent", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const folder = mkdtempSync(join(tmpdir(), "claims-review-"));
+  // The folder holds no keys, so any later check would name demo-keys.json.
+  const cases = [
+    [["review", "draft.md", "--data-use-category", ""], COMMANDS.data_use_categories.error],
+    [["review", "draft.md", "--agent-version", ""], COMMANDS.agent_versions.error],
+    [["tool-key", "sign_off"], "sign_off is not a tool a key can be given: "],
+  ];
+  try {
+    for (const [args, error] of cases) {
+      const run = spawnSync(process.execPath, [join(HERE, "..", "claims-review.mjs"), ...args], { cwd: folder, encoding: "utf8" });
+      assert.equal(run.status, 1);
+      assert.ok(run.stderr.includes(error), run.stderr);
+    }
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
 });
 
 test("settings are checked before sending", () => {

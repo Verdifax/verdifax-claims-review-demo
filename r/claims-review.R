@@ -18,6 +18,8 @@
 #   claims-review setup                              owner key in VERDIFAX_OWNER_KEY
 #   claims-review review DRAFT.md [--model ID]        model key in ANTHROPIC_API_KEY
 #   claims-review review DRAFT.md --without-actor     the gate step names no agent
+#   claims-review review DRAFT.md --agent-version V   another declared agent version, for a person's sign-off
+#   claims-review review DRAFT.md --data-use-category C   another declared data category, refused at intake
 #   claims-review sign-off JOB_ID approve|reject [--note TEXT] [--approver NAME]
 #   claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT] [--approver NAME]
 #   claims-review publish JOB_ID | publish --receipt RUN_ID
@@ -29,6 +31,10 @@
 #   claims-review key-revoke [--holder]                       the owner revokes the agent key, or the holder
 #   claims-review delete-step JOB_ID STEP                     the owner deletes one step
 #   claims-review webhook-subscribe URL | webhook-list | webhook-remove
+#   claims-review account-stop [--reason TEXT] | account-resume [--reason TEXT]
+#   claims-review tool-key TOOL,TOOL                          the owner gives a key a list of tools
+#   claims-review response-times START END                    RFC 3339 times, counted from the feed
+#   claims-review summary START END                           the period's board summary, ended 15 minutes ago or more
 #   claims-review feed
 #   claims-review verify-commands JOB_ID
 #
@@ -39,7 +45,9 @@
 # approver.txt, account-history.json, records/<job_id>/*.json with payloads/,
 # signals.json; approver-<name>-key.json (0600), approver-<name>.txt and
 # approvers.json; account-keys.json; webhook.json (0600), webhooks.json and
-# webhook-deliveries.json.
+# webhook-deliveries.json; account-stop.json, account-resume.json,
+# tool-key.json (0600), response-times.json, summary.json, summary-head.json
+# and summary.pdf.
 
 suppressPackageStartupMessages({
   library(verdifax)
@@ -57,7 +65,7 @@ ROUTE_RULE <- "claims-review/v1/rule-check"
 ROUTE_VERDICT <- "claims-review/v1/verdict"
 OBJECT_PREFIX <- "claims-review/v1/"
 LEVELS <- c("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
-MIN_VERIFIER <- "v0.36.0"
+MIN_VERIFIER <- "v0.39.0"
 # A stopped step's records live in records/stopped-<run_id>/, and the
 # model's exact answers in answers/ beside each job's steps/.
 STOPPED_FOLDER_PREFIX <- "stopped-"
@@ -65,12 +73,15 @@ ANSWERS_FOLDER <- "answers"
 # The text the server's AI review checked for each step, as the server
 # returned it once: a reader re-runs the review's check from these files.
 TRACES_FOLDER <- "traces"
-# The account policy setup activates; v1 to v3 stay for records sealed
+# The account policy setup activates; v1 to v4 stay for records sealed
 # under them. v3 requires a reviewed AI answer on every step after the gate;
 # v4 adds that every step names its agent (required_attested_fields), that
 # each verdict needs a person's sign-off, and that every step after the gate
-# passes its declared data checks.
-POLICY_FILE <- "claims-review-v4.json"
+# passes its declared data checks; v5 adds that every step declares its data
+# use within the policy's codes, that the policy watches the agent's declared
+# version and requires a person's sign-off on a verdict from a version it has
+# not approved, its own review date, and the sign-off target its results seal.
+POLICY_FILE <- "claims-review-v5.json"
 # The rule set's pinned hash, which the rule_set_pinned data check compares.
 RULE_SET_SHA256 <- "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98ae7"
 # The data checks every step declares in policy_context.data_quality, each
@@ -78,6 +89,20 @@ RULE_SET_SHA256 <- "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f9
 # sealed at intake) and rule_set_pinned (the rule set's hash is the pin).
 DATA_QUALITY_CHECKS <- c("draft_unchanged", "rule_set_pinned")
 DATA_QUALITY_SOURCE <- "claims-review draft and rule set"
+# The data use every step declares in policy_context.data_use, in the demo's
+# own codes: Verdifax seals the declaration as made and judges none of it.
+DATA_USE_PURPOSE <- "claims.review"
+DATA_USE_BASIS <- "internal:demo"
+DATA_USE_CATEGORY <- "draft.text"
+DATA_USE_CODE <- "^[a-z0-9][a-z0-9._:-]{0,63}\\z"
+# The agent's own declared name and version, sealed in attested_context as
+# declared, not verified. The policy watches them: a version it did not approve
+# is admitted only for a person's sign-off.
+CLIENT_NAME <- "claims-review"
+CLIENT_VERSION <- "5"
+# The tools an agent key may be given (verdifax-mcp's names), and account_stop.
+GRANTABLE_TOOLS <- c("account_stop", "get_record", "get_signoffs", "list_pending_signoffs", "list_records", "prepare_signoff",
+                     "read_feed", "seal_decision", "test_policy", "verify_feed", "verify_record")
 # The owner's two blocks on Verdifax, and their values.
 ACCOUNT_SETTINGS <- c("owner-replacement", "verdifax-deletion")
 SETTING_VALUES <- c("allowed", "blocked")
@@ -225,6 +250,43 @@ data_quality <- function(intake_draft_sha256, draft_sha256_now, rule_set_hash, a
   list(source = DATA_QUALITY_SOURCE, as_of = as_of, checks = list(
     list(name = DATA_QUALITY_CHECKS[1], result = result(identical(draft_sha256_now, intake_draft_sha256))),
     list(name = DATA_QUALITY_CHECKS[2], result = result(identical(rule_set_hash, RULE_SET_SHA256)))))
+}
+
+# The data use a step declares, in the demo's own codes; the categories stay
+# a JSON array, one of them included.
+data_use <- function(category) list(purpose = DATA_USE_PURPOSE, basis = DATA_USE_BASIS, categories = as_list(category))
+
+# Why a declared data category is refused before anything is sent, or NULL.
+# The pattern is matched byte by byte, so no locale widens its letter range.
+data_use_error <- function(category) {
+  if (!grepl(DATA_USE_CODE, category, perl = TRUE, useBytes = TRUE)) {
+    return("the data category must be a code of 1 to 64 lowercase letters, digits, dots, underscores, colons or hyphens")
+  }
+  NULL
+}
+
+# Why a declared agent version is refused before anything is sent, or NULL.
+client_version_error <- function(version) {
+  bytes <- as.integer(charToRaw(version))
+  if (length(bytes) < 1 || length(bytes) > 128 || any(bytes < 0x20 | bytes > 0x7E)) {
+    return("the agent version must be 1 to 128 characters of printable ASCII")
+  }
+  NULL
+}
+
+# The tools a comma-separated list names, an empty name kept as one, so a
+# stray comma is refused and never dropped.
+tool_list <- function(text) strsplit(paste0(text, ","), ",", fixed = TRUE)[[1]]
+
+# Why a tool list is refused before anything is sent, or NULL.
+tools_error <- function(tools) {
+  if (length(tools) == 0 || anyDuplicated(tools) > 0) return("name each tool once, separated by commas")
+  for (tool in tools) {
+    if (!tool %in% GRANTABLE_TOOLS) {
+      return(sprintf("%s is not a tool a key can be given: %s", tool, paste(GRANTABLE_TOOLS, collapse = ", ")))
+    }
+  }
+  NULL
 }
 
 # Why a settings command is refused before anything is sent, or NULL.
@@ -441,13 +503,22 @@ measured_cost <- function(model, input_tokens, output_tokens) {
 
 # ── review ─────────────────────────────────────────────────────────────────
 
-# A step's policy context: its object, the draft's classification and the
-# step's data checks.
-policy_context <- function(object_id, level, quality) {
-  list(object_type = "text", object_id = paste0(OBJECT_PREFIX, object_id), classification = level, data_quality = quality)
+# A step's policy context: its object, the draft's classification, the step's
+# data checks and its declared data use.
+policy_context <- function(object_id, level, quality, use) {
+  list(object_type = "text", object_id = paste0(OBJECT_PREFIX, object_id), classification = level, data_quality = quality,
+       data_use = use)
 }
 
-cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
+# A step's attested context: the agent, its declared name and version, and
+# the step's own fields.
+attested <- function(agent_version, ...) {
+  list(attested = TRUE, actor_id = ACTOR_ID, client_name = CLIENT_NAME, client_version = agent_version, ...)
+}
+
+cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE, agent_version = CLIENT_VERSION,
+                       data_use_category = DATA_USE_CATEGORY) {
+  for (problem in c(data_use_error(data_use_category), client_version_error(agent_version))) fail(problem)
   claimed <- registry_record_hash(Sys.getenv("CLAIMS_REVIEW_REGISTRY_RECORD_HASH", ""))
   if (!is.null(claimed$error)) fail(claimed$error)
   registry_record <- claimed$hash
@@ -464,6 +535,7 @@ cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
   read_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
   # The data checks, computed again now, the draft re-read.
   quality <- function() data_quality(draft_hash, sha256_hex(read_text(draft_path)), rule_set_hash, read_at)
+  use <- data_use(data_use_category)
   recorded <- load_answers(answers_path)
   now <- format(Sys.time(), "%Y%m%dT%H%M%SZ", tz = "UTC")
   job_id <- sprintf("claims-review-%s-%s", substr(draft_hash, 1, 12), now)
@@ -480,8 +552,8 @@ cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
                       # every step; --without-actor leaves the name out on
                       # purpose, so the policy refuses the draft here, before
                       # any model is called.
-                      attested_context = if (without_actor) NULL else list(attested = TRUE, actor_id = ACTOR_ID),
-                      policy_context = policy_context("intake", level, quality())),
+                      attested_context = if (without_actor) NULL else attested(agent_version),
+                      policy_context = policy_context("intake", level, quality(), use)),
     httr2_http = function(e) e)
   if (inherits(intake, "error")) {
     # The account policy refused the draft at intake (for example a
@@ -521,10 +593,10 @@ cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
     verdifax_job_step(job, "claims", after = list("intake"), payload = canonical(claims_payload), program_id = PROGRAM_ID,
                       route_id = ROUTE_CLAIMS, registry_record_hash = registry_record, ai_output_text = listed$raw,
                       request_substance = usage_substance(list(input_tokens = listed$input_tokens, output_tokens = listed$output_tokens)),
-                      attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
-                                              model_name = listed$model, prompt_hash = claims_prompt_hash,
-                                              decision_kind = "claims.list", decision_result = as.character(length(listed$claims))),
-                      policy_context = policy_context("claims", level, quality())),
+                      attested_context = attested(agent_version, model_provider = "anthropic",
+                                                  model_name = listed$model, prompt_hash = claims_prompt_hash,
+                                                  decision_kind = "claims.list", decision_result = as.character(length(listed$claims))),
+                      policy_context = policy_context("claims", level, quality(), use)),
     httr2_http = function(e) e)
   if (inherits(claims_step, "error")) {
     payloads$claims <- claims_payload
@@ -554,10 +626,10 @@ cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
       verdifax_job_step(job, rule$id, after = list("claims"), payload = canonical(payload), program_id = PROGRAM_ID,
                         route_id = ROUTE_RULE, registry_record_hash = registry_record, ai_output_text = ai_text,
                         request_substance = usage_substance(list(input_tokens = answer$input_tokens, output_tokens = answer$output_tokens)),
-                        attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
-                                                model_name = answer$model, prompt_hash = prompt_hash,
-                                                decision_kind = "claims.rule_check", decision_result = answer$verdict),
-                        policy_context = policy_context(rule$id, level, quality())),
+                        attested_context = attested(agent_version, model_provider = "anthropic",
+                                                    model_name = answer$model, prompt_hash = prompt_hash,
+                                                    decision_kind = "claims.rule_check", decision_result = answer$verdict),
+                        policy_context = policy_context(rule$id, level, quality(), use)),
       httr2_http = function(e) e)
     if (inherits(receipt, "error")) {
       # The account policy, the server's content screen or its review of
@@ -599,10 +671,10 @@ cmd_review <- function(draft_path, model, answers_path, without_actor = FALSE) {
                       payload = canonical(verdict_payload), program_id = PROGRAM_ID, route_id = ROUTE_VERDICT,
                       registry_record_hash = registry_record, ai_output_text = explained$raw,
                       request_substance = usage_substance(list(input_tokens = explained$input_tokens, output_tokens = explained$output_tokens)),
-                      attested_context = list(attested = TRUE, actor_id = ACTOR_ID, model_provider = "anthropic",
-                                              model_name = explained$model, prompt_hash = verdict_prompt_hash,
-                                              decision_kind = "claims.verdict", decision_result = verdict),
-                      policy_context = policy_context("verdict", level, quality())),
+                      attested_context = attested(agent_version, model_provider = "anthropic",
+                                                  model_name = explained$model, prompt_hash = verdict_prompt_hash,
+                                                  decision_kind = "claims.verdict", decision_result = verdict),
+                      policy_context = policy_context("verdict", level, quality(), use)),
     httr2_http = function(e) e)
   if (inherits(final, "error")) {
     payloads$verdict <- verdict_payload
@@ -1095,6 +1167,67 @@ cmd_webhook_list <- function() {
   cat(sprintf("%d webhook(s); their deliveries are in webhook-deliveries.json\n", length(hooks)))
 }
 
+# ── the account stop, tool-listed keys, response times, board summary ──────
+# The stop, its resume and a tool-listed key are sealed in the account's feed.
+# The response-time report and the board summary are counted from that feed,
+# and verdifax-verify counts each of them again. The report, the summary and
+# its head statement are saved as the exact text the server sent.
+
+# The owner's stop on the account, signed with the owner's request key. Every
+# new run is refused with a sealed receipt until the owner resumes.
+cmd_account_stop <- function(reason) {
+  answer <- verdifax_stop_account(owner_client(), reason = reason)
+  write_json("account-stop.json", answer$account_stop)
+  cat("the account is stopped; the stop is sealed in the account's feed and in account-stop.json\n")
+}
+
+# The owner lifts the owner's stop, signed with the owner's request key.
+cmd_account_resume <- function(reason) {
+  answer <- verdifax_resume_account(owner_client(), reason = reason)
+  write_json("account-resume.json", answer$account_stop)
+  cat("the account runs again; the resume is sealed in the account's feed and in account-resume.json\n")
+}
+
+# A member key the owner gives a list of tools, sealed when the key is made;
+# the server refuses the key everything else.
+cmd_tool_key <- function(text) {
+  tools <- tool_list(text)
+  problem <- tools_error(tools)
+  if (!is.null(problem)) fail(problem)
+  path <- "tool-key.json"
+  if (file.exists(path)) fail("tool-key.json exists here; the tool-listed key is already made")
+  made <- verdifax_create_account_key(owner_client(), "claims-review-tools", allowed_tools = tools)
+  signer <- verdifax_generate_request_key()
+  holder <- verdifax_client(base_url = base_url(), api_key = made$secret, signing_key = signer$private_key)
+  verdifax_register_request_key(holder)
+  granted <- as_list(unlist(made$allowed_tools))
+  write_private(path, paste0(as.character(jsonlite::toJSON(list(id = made$id, secret = made$secret, signing_key = hex(signer$private_key),
+                                                                allowed_tools = granted), auto_unbox = TRUE, pretty = TRUE)), "\n"))
+  cat(sprintf("key %s may use %s and nothing else; its list is sealed in the account's feed\n", made$id, paste(granted, collapse = ", ")))
+}
+
+# How long each result waited for a person's sign-off, with the feed it was
+# counted from.
+cmd_response_times <- function(start, end) {
+  write_text("response-times.json", verdifax_get_response_times(owner_client(), start, end, pack = TRUE))
+  cat(sprintf("response times for %s to %s are in response-times.json\n", start, end))
+  cat(sprintf("verify: verdifax-verify --signals response-times.json --response-times --feed-head-max-age %s\n", SAVED_HEAD_MAX_AGE))
+}
+
+# The period's board summary, sealed on the public log, its head statement and
+# its PDF.
+cmd_summary <- function(start, end) {
+  owner <- owner_client()
+  made <- verdifax_create_summary(owner, start, end)
+  number <- as.integer(made$id)
+  write_text("summary.json", verdifax_get_summary(owner, number))
+  write_text("summary-head.json", verdifax_get_summary_head(owner, number))
+  writeBin(verdifax_download_summary_report(owner, number), "summary.pdf")
+  cat(sprintf("board summary %d for %s to %s is in summary.json, with its head statement and summary.pdf\n", number, start, end))
+  cat(sprintf("verify, after `feed`: verdifax-verify --summary summary.json --summary-head summary-head.json --signals signals.json --feed-head-max-age %s\n",
+              SAVED_HEAD_MAX_AGE))
+}
+
 # ── main ───────────────────────────────────────────────────────────────────
 
 take_option <- function(args, name) {
@@ -1104,19 +1237,25 @@ take_option <- function(args, name) {
   list(value = args[i + 1], args = args[-c(i, i + 1)])
 }
 
+COMMANDS_HELP <- "commands: setup, review DRAFT.md [--model ID] [--agent-version V] [--data-use-category C] [--without-actor], sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-register KEY_FILE, request-key-rotate [--holder], request-key-clear [--holder], key-revoke [--holder], delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, account-stop [--reason TEXT], account-resume [--reason TEXT], tool-key TOOL,TOOL, response-times START END, summary START END, feed, verify-commands JOB_ID"
+
 main <- function() {
   args <- commandArgs(trailingOnly = TRUE)
-  if (length(args) == 0) fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-register KEY_FILE, request-key-rotate [--holder], request-key-clear [--holder], key-revoke [--holder], delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID")
+  if (length(args) == 0) fail(COMMANDS_HELP)
   command <- args[1]
   args <- args[-1]
   if (command == "setup") return(cmd_setup())
   if (command == "review") {
     model <- take_option(args, "--model"); args <- model$args
     answers <- take_option(args, "--answers"); args <- answers$args
+    version <- take_option(args, "--agent-version"); args <- version$args
+    category <- take_option(args, "--data-use-category"); args <- category$args
     without_actor <- "--without-actor" %in% args
     args <- args[args != "--without-actor"]
     if (length(args) != 1) fail("review takes one draft file")
-    return(cmd_review(args[1], if (is.null(model$value)) DEFAULT_MODEL else model$value, answers$value, without_actor))
+    return(cmd_review(args[1], if (is.null(model$value)) DEFAULT_MODEL else model$value, answers$value, without_actor,
+                      if (is.null(version$value)) CLIENT_VERSION else version$value,
+                      if (is.null(category$value)) DATA_USE_CATEGORY else category$value))
   }
   if (command == "sign-off") {
     note <- take_option(args, "--note"); args <- note$args
@@ -1164,12 +1303,25 @@ main <- function() {
   }
   if (command == "webhook-list") return(cmd_webhook_list())
   if (command == "webhook-remove") return(cmd_webhook_remove())
+  if (command %in% c("account-stop", "account-resume")) {
+    reason <- take_option(args, "--reason"); args <- reason$args
+    if (length(args) != 0) fail(paste(command, "takes only --reason TEXT"))
+    return(if (command == "account-stop") cmd_account_stop(reason$value) else cmd_account_resume(reason$value))
+  }
+  if (command == "tool-key") {
+    if (length(args) != 1) fail("tool-key takes the TOOLS, separated by commas")
+    return(cmd_tool_key(args[1]))
+  }
+  if (command %in% c("response-times", "summary")) {
+    if (length(args) != 2) fail(paste(command, "takes a START and an END, RFC 3339 times"))
+    return(if (command == "response-times") cmd_response_times(args[1], args[2]) else cmd_summary(args[1], args[2]))
+  }
   if (command == "feed") return(cmd_feed())
   if (command == "verify-commands") {
     if (length(args) != 1) fail("verify-commands takes a JOB_ID")
     return(print_verify_commands(args[1]))
   }
-  fail("commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-register KEY_FILE, request-key-rotate [--holder], request-key-clear [--holder], key-revoke [--holder], delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID")
+  fail(COMMANDS_HELP)
 }
 
 if (!nzchar(Sys.getenv("CLAIMS_REVIEW_NO_MAIN"))) main()

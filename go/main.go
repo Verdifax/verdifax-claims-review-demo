@@ -17,6 +17,8 @@
 //	claims-review setup                              owner key in VERDIFAX_OWNER_KEY
 //	claims-review review DRAFT.md [--model ID]        model key in ANTHROPIC_API_KEY
 //	claims-review review DRAFT.md --without-actor     the gate step names no agent
+//	claims-review review DRAFT.md --agent-version V   another declared agent version, for a person's sign-off
+//	claims-review review DRAFT.md --data-use-category C   another declared data category, refused at intake
 //	claims-review sign-off JOB_ID approve|reject [--note TEXT] [--approver NAME]
 //	claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT] [--approver NAME]
 //	claims-review publish JOB_ID | publish --receipt RUN_ID
@@ -28,6 +30,10 @@
 //	claims-review key-revoke [--holder]                       the owner revokes the agent key, or the holder
 //	claims-review delete-step JOB_ID STEP                     the owner deletes one step
 //	claims-review webhook-subscribe URL | webhook-list | webhook-remove
+//	claims-review account-stop [--reason TEXT] | account-resume [--reason TEXT]
+//	claims-review tool-key TOOL,TOOL                          the owner gives a key a list of tools
+//	claims-review response-times START END                    RFC 3339 times, counted from the feed
+//	claims-review summary START END                           the period's board summary, ended 15 minutes ago or more
 //	claims-review feed
 //	claims-review verify-commands JOB_ID
 //
@@ -38,10 +44,13 @@
 // approver.txt, account-history.json, records/<job_id>/*.json with payloads/,
 // signals.json; approver-<name>-key.json (0600), approver-<name>.txt and
 // approvers.json; account-keys.json; webhook.json (0600), webhooks.json and
-// webhook-deliveries.json.
+// webhook-deliveries.json; account-stop.json, account-resume.json,
+// tool-key.json (0600), response-times.json, summary.json, summary-head.json
+// and summary.pdf.
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -58,6 +67,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	verdifax "github.com/Verdifax/verdifax-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/v2"
@@ -75,7 +85,7 @@ const (
 	routeRule      = "claims-review/v1/rule-check"
 	routeVerdict   = "claims-review/v1/verdict"
 	objectPrefix   = "claims-review/v1/"
-	minVerifier    = "v0.36.0"
+	minVerifier    = "v0.39.0"
 	// Anthropic's SDKs retry a dropped connection, 408, 409, 429 and any
 	// 5xx, but only twice by default, waiting half a second then one
 	// second. That is too short: on November 13, 2026 a 503 from the
@@ -94,18 +104,33 @@ const (
 	// The text the server's AI review checked for each step, as the server
 	// returned it once: a reader re-runs the review's check from these files.
 	tracesFolder = "traces"
-	// The account policy setup activates; v1 to v3 stay for records sealed
+	// The account policy setup activates; v1 to v4 stay for records sealed
 	// under them. v3 requires a reviewed AI answer on every step after the
 	// gate; v4 adds that every step names its agent
 	// (required_attested_fields), that each verdict needs a person's
 	// sign-off, and that every step after the gate passes its declared data
-	// checks.
-	policyFile = "claims-review-v4.json"
+	// checks; v5 adds that every step declares its data use within the
+	// policy's codes, that the policy watches the agent's declared version
+	// and requires a person's sign-off on a verdict from a version it has
+	// not approved, its own review date, and the sign-off target its results
+	// seal.
+	policyFile = "claims-review-v5.json"
 	// The rule set's pinned hash, which the rule_set_pinned data check
 	// compares.
 	ruleSetSHA256 = "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98ae7"
 	// The source every step's data checks name.
 	dataQualitySource = "claims-review draft and rule set"
+	// The data use every step declares in policy_context.data_use, in the
+	// demo's own codes: Verdifax seals the declaration as made and judges
+	// none of it.
+	dataUsePurpose  = "claims.review"
+	dataUseBasis    = "internal:demo"
+	dataUseCategory = "draft.text"
+	// The agent's own declared name and version, sealed in attested_context
+	// as declared, not verified. The policy watches them: a version it did
+	// not approve is admitted only for a person's sign-off.
+	clientName    = "claims-review"
+	clientVersion = "5"
 	// The AI's work on the steps after the gate: listing the draft's claims,
 	// and explaining the verdict code decided.
 	claimsPrompt  = "claims-prompt-v1.txt"
@@ -130,6 +155,14 @@ const (
 // computed: draft_unchanged (the draft re-read before the step has the hash
 // sealed at intake) and rule_set_pinned (the rule set's hash is the pin).
 var dataQualityChecks = []string{"draft_unchanged", "rule_set_pinned"}
+
+// dataUseCode is the form of a data use code; Go's $ matches only at the end
+// of the text.
+var dataUseCode = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,63}$`)
+
+// The tools an agent key may be given (verdifax-mcp's names), and account_stop.
+var grantableTools = []string{"account_stop", "get_record", "get_signoffs", "list_pending_signoffs", "list_records", "prepare_signoff",
+	"read_feed", "seal_decision", "test_policy", "verify_feed", "verify_record"}
 
 // The owner's two blocks on Verdifax, and their values.
 var (
@@ -357,6 +390,53 @@ func dataQuality(intakeDraftSHA256, draftSHA256Now, ruleSetHash, asOf string) *v
 	return &verdifax.DataQuality{Source: dataQualitySource, AsOf: asOf, Checks: []verdifax.DataCheck{
 		{Name: dataQualityChecks[0], Result: result(draftSHA256Now == intakeDraftSHA256)},
 		{Name: dataQualityChecks[1], Result: result(ruleSetHash == ruleSetSHA256)}}}
+}
+
+// dataUse is the data use a step declares, in the demo's own codes, sent as
+// policy_context.data_use's purpose, basis and categories.
+func dataUse(category string) *verdifax.DataUse {
+	return &verdifax.DataUse{Purpose: dataUsePurpose, Basis: dataUseBasis, Categories: []string{category}}
+}
+
+// dataUseError is why a declared data category is refused before anything is
+// sent, or "".
+func dataUseError(category string) string {
+	if !dataUseCode.MatchString(category) {
+		return "the data category must be a code of 1 to 64 lowercase letters, digits, dots, underscores, colons or hyphens"
+	}
+	return ""
+}
+
+// clientVersionError is why a declared agent version is refused before
+// anything is sent, or "". The length is counted in characters, and only
+// printable ASCII (0x20 to 0x7E) is allowed.
+func clientVersionError(version string) string {
+	length := utf8.RuneCountInString(version)
+	refused := length < 1 || length > 128
+	for _, c := range version {
+		refused = refused || c < 0x20 || c > 0x7E
+	}
+	if refused {
+		return "the agent version must be 1 to 128 characters of printable ASCII"
+	}
+	return ""
+}
+
+// toolsError is why a tool list is refused before anything is sent, or "".
+func toolsError(tools []string) string {
+	named := map[string]bool{}
+	for _, tool := range tools {
+		named[tool] = true
+	}
+	if len(tools) == 0 || len(named) != len(tools) {
+		return "name each tool once, separated by commas"
+	}
+	for _, tool := range tools {
+		if !containsString(grantableTools, tool) {
+			return fmt.Sprintf("%s is not a tool a key can be given: %s", tool, strings.Join(grantableTools, ", "))
+		}
+	}
+	return ""
 }
 
 // settingError is why a settings command is refused before anything is sent,
@@ -689,10 +769,21 @@ func measuredCost(model string, inputTokens, outputTokens int64) (float64, bool)
 // ── review ─────────────────────────────────────────────────────────────────
 
 // policyContext is a step's policy context: its object, the draft's
-// classification and the step's data checks, sent as policy_context's
-// object_type, object_id, classification and data_quality.
-func policyContext(objectID, level string, quality *verdifax.DataQuality) *verdifax.PolicyContext {
-	return &verdifax.PolicyContext{ObjectType: "text", ObjectID: objectPrefix + objectID, Classification: level, DataQuality: quality}
+// classification, the step's data checks and its data use, sent as
+// policy_context's object_type, object_id, classification, data_quality and
+// data_use.
+func policyContext(objectID, level string, quality *verdifax.DataQuality, use *verdifax.DataUse) *verdifax.PolicyContext {
+	return &verdifax.PolicyContext{ObjectType: "text", ObjectID: objectPrefix + objectID, Classification: level, DataQuality: quality, DataUse: use}
+}
+
+// attestedContext is a step's attested context: the agent, its declared name
+// and version, and the step's own fields.
+func attestedContext(agentVersion string, fields map[string]any) map[string]any {
+	out := map[string]any{"attested": true, "actor_id": actorID, "client_name": clientName, "client_version": agentVersion}
+	for k, v := range fields {
+		out[k] = v
+	}
+	return out
 }
 
 // registryRecord is the program registry record every step claims. A server
@@ -711,7 +802,12 @@ func registryRecord(given string) (string, string) {
 	return given, ""
 }
 
-func cmdReview(ctx context.Context, draftPath, model, answersPath string, withoutActor bool) {
+func cmdReview(ctx context.Context, draftPath, model, answersPath, agentVersion, dataCategory string, withoutActor bool) {
+	for _, problem := range []string{dataUseError(dataCategory), clientVersionError(agentVersion)} {
+		if problem != "" {
+			fail(problem)
+		}
+	}
 	registryRecordClaimed, registryErr := registryRecord(os.Getenv("CLAIMS_REVIEW_REGISTRY_RECORD_HASH"))
 	if registryErr != "" {
 		fail(registryErr)
@@ -744,11 +840,11 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string, withou
 	// the draft here, before any model is called.
 	var agentNamed map[string]any
 	if !withoutActor {
-		agentNamed = map[string]any{"attested": true, "actor_id": actorID}
+		agentNamed = attestedContext(agentVersion, nil)
 	}
 	intake, intakeErr := job.Step(ctx, "intake", &verdifax.AttestRequest{PayloadText: canonical(intakePayload), ProgramID: programID,
 		RouteID: routeIntake, RegistryRecordHash: registryRecordClaimed, AttestedContext: agentNamed,
-		PolicyContext: policyContext("intake", level, quality())}, verdifax.WithAfter())
+		PolicyContext: policyContext("intake", level, quality(), dataUse(dataCategory))}, verdifax.WithAfter())
 	var apiErr *verdifax.APIError
 	if errors.As(intakeErr, &apiErr) {
 		// The account policy refused the draft at intake (for example a
@@ -788,9 +884,9 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string, withou
 	claimsStep, claimsErr := job.Step(ctx, "claims", &verdifax.AttestRequest{PayloadText: canonical(claimsPayload), ProgramID: programID,
 		RouteID: routeClaims, RegistryRecordHash: registryRecordClaimed, AIOutputText: listed.Raw,
 		RequestSubstance: usageSubstance(&usageReport{InputTokens: listed.InputTokens, OutputTokens: listed.OutputTokens}),
-		AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "model_provider": "anthropic", "model_name": listed.Model,
-			"prompt_hash": claimsPromptHash, "decision_kind": "claims.list", "decision_result": fmt.Sprint(len(claims))},
-		PolicyContext: policyContext("claims", level, quality())}, verdifax.WithAfter("intake"))
+		AttestedContext: attestedContext(agentVersion, map[string]any{"model_provider": "anthropic", "model_name": listed.Model,
+			"prompt_hash": claimsPromptHash, "decision_kind": "claims.list", "decision_result": fmt.Sprint(len(claims))}),
+		PolicyContext: policyContext("claims", level, quality(), dataUse(dataCategory))}, verdifax.WithAfter("intake"))
 	if errors.As(claimsErr, &apiErr) {
 		payloads["claims"] = claimsPayload
 		if apiErr.AivpTraceText != "" {
@@ -828,9 +924,9 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string, withou
 		receipt, stepErr := job.Step(ctx, r.ID, &verdifax.AttestRequest{PayloadText: canonical(payload), ProgramID: programID,
 			RouteID: routeRule, RegistryRecordHash: registryRecordClaimed, AIOutputText: aiText,
 			RequestSubstance: usageSubstance(&usageReport{InputTokens: a.InputTokens, OutputTokens: a.OutputTokens}),
-			AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "model_provider": "anthropic", "model_name": a.Model,
-				"prompt_hash": promptHash, "decision_kind": "claims.rule_check", "decision_result": a.Verdict},
-			PolicyContext: policyContext(r.ID, level, quality())}, verdifax.WithAfter("claims"))
+			AttestedContext: attestedContext(agentVersion, map[string]any{"model_provider": "anthropic", "model_name": a.Model,
+				"prompt_hash": promptHash, "decision_kind": "claims.rule_check", "decision_result": a.Verdict}),
+			PolicyContext: policyContext(r.ID, level, quality(), dataUse(dataCategory))}, verdifax.WithAfter("claims"))
 		if errors.As(stepErr, &apiErr) {
 			// The account policy, the server's content screen or its review
 			// of the model's answer stopped this step, so the job stops here:
@@ -883,9 +979,9 @@ func cmdReview(ctx context.Context, draftPath, model, answersPath string, withou
 	final, finalErr := job.Step(ctx, "verdict", &verdifax.AttestRequest{PayloadText: canonical(verdictPayload), ProgramID: programID,
 		RouteID: routeVerdict, RegistryRecordHash: registryRecordClaimed, AIOutputText: explained.Raw,
 		RequestSubstance: usageSubstance(&usageReport{InputTokens: explained.InputTokens, OutputTokens: explained.OutputTokens}),
-		AttestedContext: map[string]any{"attested": true, "actor_id": actorID, "model_provider": "anthropic", "model_name": explained.Model,
-			"prompt_hash": verdictPromptHash, "decision_kind": "claims.verdict", "decision_result": verdict},
-		PolicyContext: policyContext("verdict", level, quality())}, verdifax.WithAfter(ruleIDs...), verdifax.WithFinal())
+		AttestedContext: attestedContext(agentVersion, map[string]any{"model_provider": "anthropic", "model_name": explained.Model,
+			"prompt_hash": verdictPromptHash, "decision_kind": "claims.verdict", "decision_result": verdict}),
+		PolicyContext: policyContext("verdict", level, quality(), dataUse(dataCategory))}, verdifax.WithAfter(ruleIDs...), verdifax.WithFinal())
 	if errors.As(finalErr, &apiErr) {
 		payloads["verdict"] = verdictPayload
 		if apiErr.AivpTraceText != "" {
@@ -1653,6 +1749,86 @@ func cmdWebhookList(ctx context.Context) {
 	fmt.Printf("%d webhook(s); their deliveries are in webhook-deliveries.json\n", len(hooks))
 }
 
+// ── the account stop, tool-listed keys, response times, board summary ──────
+// The stop, its resume and a tool-listed key are sealed in the account's feed.
+// The response-time report and the board summary are counted from that feed,
+// and verdifax-verify counts each of them again. Each sealed document is saved
+// with every field the server sent, in the order it sent them.
+
+// cmdAccountStop is the owner's stop on the account, signed with the owner's
+// request key. Every new run is refused with a sealed receipt until the owner
+// resumes.
+func cmdAccountStop(ctx context.Context, reason string) {
+	answer, stopErr := ownerClient().StopAccount(ctx, &verdifax.StopAccountOptions{Reason: reason})
+	must(stopErr)
+	writeJSON("account-stop.json", answer.AccountStop)
+	fmt.Println("the account is stopped; the stop is sealed in the account's feed and in account-stop.json")
+}
+
+// cmdAccountResume lifts the owner's stop, signed with the owner's request
+// key.
+func cmdAccountResume(ctx context.Context, reason string) {
+	answer, resumeErr := ownerClient().ResumeAccount(ctx, &verdifax.ResumeAccountOptions{Reason: reason})
+	must(resumeErr)
+	writeJSON("account-resume.json", answer.AccountStop)
+	fmt.Println("the account runs again; the resume is sealed in the account's feed and in account-resume.json")
+}
+
+// cmdToolKey makes a member key the owner gives a list of tools, sealed when
+// the key is made; the server refuses the key everything else.
+func cmdToolKey(ctx context.Context, toolList string) {
+	tools := strings.Split(toolList, ",")
+	if problem := toolsError(tools); problem != "" {
+		fail(problem)
+	}
+	if _, statErr := os.Stat("tool-key.json"); statErr == nil {
+		fail("tool-key.json exists here; the tool-listed key is already made")
+	}
+	made, makeErr := ownerClient().CreateAccountKey(ctx, &verdifax.CreateAccountKeyRequest{Name: "claims-review-tools", AllowedTools: tools})
+	must(makeErr)
+	_, signer, genErr := verdifax.GenerateRequestKey()
+	must(genErr)
+	holder, holderErr := verdifax.NewClient(verdifax.Config{BaseURL: baseURL(), APIKey: made.Secret, SigningKey: signer})
+	must(holderErr)
+	_, registerErr := holder.RegisterRequestKey(ctx)
+	must(registerErr)
+	allowed := *made.AllowedTools // the SDK refuses an answer without the list it sent
+	encoded, encodeErr := json.MarshalIndent(map[string]any{"id": made.ID, "secret": made.Secret, "signing_key": hex.EncodeToString(signer),
+		"allowed_tools": allowed}, "", "  ")
+	must(encodeErr)
+	writePrivate("tool-key.json", string(encoded)+"\n")
+	fmt.Printf("key %d may use %s and nothing else; its list is sealed in the account's feed\n", made.ID, strings.Join(allowed, ", "))
+}
+
+// cmdResponseTimes is how long each result waited for a person's sign-off,
+// with the feed it was counted from.
+func cmdResponseTimes(ctx context.Context, start, end string) {
+	report, reportErr := ownerClient().GetResponseTimes(ctx, start, end, &verdifax.ResponseTimesOptions{Pack: true})
+	must(reportErr)
+	writeJSON("response-times.json", report)
+	fmt.Printf("response times for %s to %s are in response-times.json\n", start, end)
+	fmt.Printf("verify: verdifax-verify --signals response-times.json --response-times --feed-head-max-age %s\n", savedHeadMaxAge)
+}
+
+// cmdSummary is the period's board summary, sealed on the public log, its
+// head statement and its PDF.
+func cmdSummary(ctx context.Context, start, end string) {
+	owner := ownerClient()
+	made, makeErr := owner.CreateSummary(ctx, start, end)
+	must(makeErr)
+	summary, summaryErr := owner.GetSummary(ctx, made.ID)
+	must(summaryErr)
+	writeJSON("summary.json", summary)
+	head, headErr := owner.GetSummaryHead(ctx, made.ID)
+	must(headErr)
+	writeJSON("summary-head.json", head)
+	var report bytes.Buffer
+	must(owner.DownloadSummaryReport(ctx, made.ID, &report))
+	writeText("summary.pdf", report.String())
+	fmt.Printf("board summary %d for %s to %s is in summary.json, with its head statement and summary.pdf\n", made.ID, start, end)
+	fmt.Printf("verify, after `feed`: verdifax-verify --summary summary.json --summary-head summary-head.json --signals signals.json --feed-head-max-age %s\n", savedHeadMaxAge)
+}
+
 // ── main ───────────────────────────────────────────────────────────────────
 
 func takeOption(args []string, name string) (string, []string) {
@@ -1665,6 +1841,16 @@ func takeOption(args []string, name string) (string, []string) {
 		}
 	}
 	return "", args
+}
+
+// takeOptionOr is takeOption with a default, used only when the option is not
+// given: an option given as an empty value stays empty.
+func takeOptionOr(args []string, name, fallback string) (string, []string) {
+	value, rest := takeOption(args, name)
+	if len(rest) == len(args) {
+		return fallback, rest
+	}
+	return value, rest
 }
 
 // takeFlag reports whether a flag with no value was given, and the args
@@ -1680,7 +1866,7 @@ func takeFlag(args []string, name string) (bool, []string) {
 
 func main() {
 	ctx := context.Background()
-	usage := "commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-register KEY_FILE, request-key-rotate [--holder], request-key-clear [--holder], key-revoke [--holder], delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, feed, verify-commands JOB_ID"
+	usage := "commands: setup, review DRAFT.md, sign-off JOB_ID approve|reject, sign-off --receipt RUN_ID approve|reject, publish JOB_ID, publish --receipt RUN_ID, unpublish JOB_ID, unpublish --receipt RUN_ID, approver-add NAME, approver-revoke NAME, settings SETTING VALUE, request-key-register KEY_FILE, request-key-rotate [--holder], request-key-clear [--holder], key-revoke [--holder], delete-step JOB_ID STEP, webhook-subscribe URL, webhook-list, webhook-remove, account-stop [--reason TEXT], account-resume [--reason TEXT], tool-key TOOL,TOOL, response-times START END, summary START END, feed, verify-commands JOB_ID"
 	if len(os.Args) < 2 {
 		fail(usage)
 	}
@@ -1691,6 +1877,8 @@ func main() {
 	case "review":
 		model, rest := takeOption(args, "--model")
 		answers, rest := takeOption(rest, "--answers")
+		agentVersion, rest := takeOptionOr(rest, "--agent-version", clientVersion)
+		dataCategory, rest := takeOptionOr(rest, "--data-use-category", dataUseCategory)
 		withoutActor, rest := takeFlag(rest, "--without-actor")
 		if model == "" {
 			model = defaultModel
@@ -1698,7 +1886,7 @@ func main() {
 		if len(rest) != 1 {
 			fail("review takes one draft file")
 		}
-		cmdReview(ctx, rest[0], model, answers, withoutActor)
+		cmdReview(ctx, rest[0], model, answers, agentVersion, dataCategory, withoutActor)
 	case "sign-off":
 		note, rest := takeOption(args, "--note")
 		receipt, rest := takeOption(rest, "--receipt")
@@ -1774,6 +1962,30 @@ func main() {
 		cmdWebhookList(ctx)
 	case "webhook-remove":
 		cmdWebhookRemove(ctx)
+	case "account-stop", "account-resume":
+		reason, rest := takeOption(args, "--reason")
+		if len(rest) != 0 {
+			fail(command + " takes only --reason TEXT")
+		}
+		if command == "account-stop" {
+			cmdAccountStop(ctx, reason)
+		} else {
+			cmdAccountResume(ctx, reason)
+		}
+	case "tool-key":
+		if len(args) != 1 {
+			fail("tool-key takes the tools the key may use, separated by commas")
+		}
+		cmdToolKey(ctx, args[0])
+	case "response-times", "summary":
+		if len(args) != 2 {
+			fail(command + " takes a START and an END, RFC 3339 times")
+		}
+		if command == "response-times" {
+			cmdResponseTimes(ctx, args[0], args[1])
+		} else {
+			cmdSummary(ctx, args[0], args[1])
+		}
 	case "feed":
 		cmdFeed(ctx)
 	case "verify-commands":

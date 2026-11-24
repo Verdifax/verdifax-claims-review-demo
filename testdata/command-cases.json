@@ -226,5 +226,54 @@
       "https://verdifax.com/127.0.0.1"
     ],
     "error": "--answers is for tests against a local server, never a live one"
+  },
+  "data_use_categories": {
+    "valid": [
+      "draft.text",
+      "customer.records",
+      "a"
+    ],
+    "invalid": [
+      "",
+      "Draft",
+      "a b",
+      "-a",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "a\n"
+    ],
+    "error": "the data category must be a code of 1 to 64 lowercase letters, digits, dots, underscores, colons or hyphens"
+  },
+  "agent_versions": {
+    "valid": [
+      "5",
+      "6-preview"
+    ],
+    "invalid": [
+      "",
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "5\n",
+      "vé"
+    ],
+    "error": "the agent version must be 1 to 128 characters of printable ASCII"
+  },
+  "tool_lists": {
+    "valid": [
+      "seal_decision",
+      "get_record,seal_decision"
+    ],
+    "invalid": [
+      {
+        "tools": "",
+        "error": " is not a tool a key can be given: "
+      },
+      {
+        "tools": "seal_decision,seal_decision",
+        "error": "name each tool once, separated by commas"
+      },
+      {
+        "tools": "sign_off",
+        "error": "sign_off is not a tool a key can be given: "
+      }
+    ]
   }
 }

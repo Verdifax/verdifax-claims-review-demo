@@ -256,10 +256,35 @@ class Round62(unittest.TestCase):
         _, rule_set_hash = cr.load_rules()
         self.assertEqual(rule_set_hash, cr.RULE_SET_SHA256)
 
-    def test_the_policy_is_v4(self):
+    def test_the_policy_is_v5(self):
         self.assertEqual(cr.POLICY_FILE, PARITY["constants"]["policy_file"])
         policy = json.loads((cr.REPO / "policy" / cr.POLICY_FILE).read_text(encoding="utf-8"))
         self.assertEqual(policy["required_attested_fields"], ["actor_id"])
+        self.assertEqual(policy["watch_setup"]["fields"], ["client_name", "client_version"])
+        uses = [c for r in policy["rules"] for c in r.get("conditions") or [] if c["type"] == "data_use"]
+        self.assertEqual(len(uses), 4)
+        for use in uses:
+            self.assertEqual(use["purpose_match"]["value"], cr.DATA_USE_PURPOSE)
+            self.assertEqual(use["categories_allowed"], [cr.DATA_USE_CATEGORY])
+        approved = [f for r in policy["rules"] for c in r.get("conditions") or [] if c["type"] == "attested_setup" for f in c["facts"]]
+        self.assertEqual([(f["fact"], f["match"]["value"]) for f in approved], [("client_version", cr.CLIENT_VERSION)])
+
+    def test_data_use_agent_versions_and_tool_lists(self):
+        constants = PARITY["constants"]
+        self.assertEqual(cr.data_use(cr.DATA_USE_CATEGORY), {"purpose": constants["data_use_purpose"], "basis": constants["data_use_basis"],
+                                                             "categories": [constants["data_use_category"]]})
+        self.assertEqual((cr.CLIENT_NAME, cr.CLIENT_VERSION), (constants["client_name"], constants["client_version"]))
+        self.assertEqual(list(cr.GRANTABLE_TOOLS), constants["grantable_tools"])
+        for name, check in (("data_use_categories", cr.data_use_error), ("agent_versions", cr.client_version_error)):
+            for value in COMMANDS[name]["valid"]:
+                self.assertIsNone(check(value), value)
+            for value in COMMANDS[name]["invalid"]:
+                self.assertEqual(check(value), COMMANDS[name]["error"], value)
+        for tools in COMMANDS["tool_lists"]["valid"]:
+            self.assertIsNone(cr.tools_error(tools.split(",")), tools)
+        for case in COMMANDS["tool_lists"]["invalid"]:
+            error = cr.tools_error(case["tools"].split(","))
+            self.assertTrue(error is not None and error.startswith(case["error"]), case["tools"])
 
     def test_settings_are_checked_before_sending(self):
         for setting, value in COMMANDS["settings"]["valid"]:

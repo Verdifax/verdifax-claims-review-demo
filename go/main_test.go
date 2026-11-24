@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -554,18 +556,236 @@ func TestTheDataChecksAreComputed(t *testing.T) {
 	}
 }
 
-func TestTheLoadedRuleSetIsThePinnedOneAndThePolicyIsV4(t *testing.T) {
+func TestTheLoadedRuleSetIsThePinnedOneAndThePolicyIsV5(t *testing.T) {
 	if _, hash := loadRules(); hash != ruleSetSHA256 {
 		t.Fatalf("the rule set hashes to %s, the pin is %s", hash, ruleSetSHA256)
 	}
+	type match struct {
+		Value string `json:"value"`
+	}
 	var policy struct {
-		Required []string `json:"required_attested_fields"`
+		Required   []string `json:"required_attested_fields"`
+		WatchSetup struct {
+			Fields []string `json:"fields"`
+		} `json:"watch_setup"`
+		Rules []struct {
+			Conditions []struct {
+				Type              string   `json:"type"`
+				PurposeMatch      match    `json:"purpose_match"`
+				CategoriesAllowed []string `json:"categories_allowed"`
+				Facts             []struct {
+					Fact  string `json:"fact"`
+					Match match  `json:"match"`
+				} `json:"facts"`
+			} `json:"conditions"`
+		} `json:"rules"`
 	}
 	if decodeErr := json.Unmarshal(readFile(filepath.Join(repo, "policy", policyFile)), &policy); decodeErr != nil {
 		t.Fatal(decodeErr)
 	}
-	if policyFile != "claims-review-v4.json" || !reflect.DeepEqual(policy.Required, []string{"actor_id"}) {
+	if policyFile != parityConstants(t)["policy_file"] || !reflect.DeepEqual(policy.Required, []string{"actor_id"}) {
 		t.Fatalf("policy %s requires %v", policyFile, policy.Required)
+	}
+	if !reflect.DeepEqual(policy.WatchSetup.Fields, []string{"client_name", "client_version"}) {
+		t.Errorf("the policy watches %v", policy.WatchSetup.Fields)
+	}
+	uses, approved := 0, []string{}
+	for _, r := range policy.Rules {
+		for _, c := range r.Conditions {
+			switch c.Type {
+			case "data_use":
+				uses++
+				if c.PurposeMatch.Value != dataUsePurpose || !reflect.DeepEqual(c.CategoriesAllowed, []string{dataUseCategory}) {
+					t.Errorf("a rule allows purpose %s and categories %v", c.PurposeMatch.Value, c.CategoriesAllowed)
+				}
+			case "attested_setup":
+				for _, f := range c.Facts {
+					approved = append(approved, f.Fact+"="+f.Match.Value)
+				}
+			}
+		}
+	}
+	if uses != 4 || !reflect.DeepEqual(approved, []string{"client_version=" + clientVersion}) {
+		t.Fatalf("%d data use conditions, approved setups %v", uses, approved)
+	}
+}
+
+func TestDataUseAgentVersionsAndToolLists(t *testing.T) {
+	constants := parityConstants(t)
+	wantUse := map[string]any{"purpose": constants["data_use_purpose"], "basis": constants["data_use_basis"],
+		"categories": []any{constants["data_use_category"]}}
+	if got := asJSON(t, dataUse(dataUseCategory)); !reflect.DeepEqual(got, wantUse) {
+		t.Errorf("data use %v, want %v", got, wantUse)
+	}
+	if clientName != constants["client_name"] || clientVersion != constants["client_version"] {
+		t.Errorf("client %s %s", clientName, clientVersion)
+	}
+	if !reflect.DeepEqual(asJSON(t, grantableTools), constants["grantable_tools"]) {
+		t.Errorf("grantable tools %v", grantableTools)
+	}
+	type values struct {
+		Valid   []string `json:"valid"`
+		Invalid []string `json:"invalid"`
+		Error   string   `json:"error"`
+	}
+	var c struct {
+		Categories values `json:"data_use_categories"`
+		Versions   values `json:"agent_versions"`
+		ToolLists  struct {
+			Valid   []string `json:"valid"`
+			Invalid []struct {
+				Tools string `json:"tools"`
+				Error string `json:"error"`
+			} `json:"invalid"`
+		} `json:"tool_lists"`
+	}
+	readCases(t, "command-cases.json", &c)
+	if len(c.Categories.Invalid) == 0 || len(c.Versions.Invalid) == 0 || len(c.ToolLists.Invalid) == 0 {
+		t.Fatal("command-cases.json holds no data use, version or tool list cases")
+	}
+	for _, check := range []struct {
+		cases values
+		why   func(string) string
+	}{{c.Categories, dataUseError}, {c.Versions, clientVersionError}} {
+		for _, v := range check.cases.Valid {
+			if got := check.why(v); got != "" {
+				t.Errorf("%q refused: %s", v, got)
+			}
+		}
+		for _, v := range check.cases.Invalid {
+			if got := check.why(v); got != check.cases.Error {
+				t.Errorf("%q: %q, want %q", v, got, check.cases.Error)
+			}
+		}
+	}
+	for _, tools := range c.ToolLists.Valid {
+		if got := toolsError(strings.Split(tools, ",")); got != "" {
+			t.Errorf("tools %q refused: %s", tools, got)
+		}
+	}
+	for _, bad := range c.ToolLists.Invalid {
+		if got := toolsError(strings.Split(bad.Tools, ",")); got == "" || !strings.HasPrefix(got, bad.Error) {
+			t.Errorf("tools %q: %q, want %q", bad.Tools, got, bad.Error)
+		}
+	}
+}
+
+// Every step names its agent, the agent's declared name and version, and its
+// data use, in the fields demo-parity.json lists.
+func TestEveryStepDeclaresItsAgentVersionAndDataUse(t *testing.T) {
+	var parity struct {
+		Attested map[string][]string `json:"attested_context"`
+		Policy   struct {
+			Fields []string `json:"fields"`
+		} `json:"policy_context"`
+	}
+	if decodeErr := json.Unmarshal(readFile(filepath.Join(repo, "demo-parity.json")), &parity); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	keysOf := func(value any) []string {
+		out := []string{}
+		for k := range asJSON(t, value).(map[string]any) {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+	sorted := func(list []string) []string {
+		out := append([]string{}, list...)
+		sort.Strings(out)
+		return out
+	}
+	intake := attestedContext("6-preview", nil)
+	if intake["client_name"] != clientName || intake["client_version"] != "6-preview" {
+		t.Errorf("the gate step declares %v", intake)
+	}
+	if got := keysOf(intake); !reflect.DeepEqual(got, sorted(parity.Attested["intake"])) {
+		t.Errorf("the gate step's attested fields are %v", got)
+	}
+	model := attestedContext(clientVersion, map[string]any{"model_provider": "anthropic", "model_name": "m", "prompt_hash": "h",
+		"decision_kind": "claims.list", "decision_result": "1"})
+	if got := keysOf(model); !reflect.DeepEqual(got, sorted(parity.Attested["claims"])) {
+		t.Errorf("a model step's attested fields are %v", got)
+	}
+	step := policyContext("intake", "INTERNAL", dataQuality("a", "a", ruleSetSHA256, "2026-11-24T00:00:00Z"), dataUse(dataUseCategory))
+	if got := keysOf(step); !reflect.DeepEqual(got, sorted(parity.Policy.Fields)) {
+		t.Errorf("the policy context's fields are %v", got)
+	}
+}
+
+// A bad value is refused before anything is read or sent, an empty one
+// included: no key file exists in the folder these run in.
+func TestBadDeclarationsAreRefusedBeforeAnythingIsSent(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"review", "d.md", "--data-use-category", "Draft"}, dataUseError("Draft")},
+		{[]string{"review", "d.md", "--data-use-category", ""}, dataUseError("")},
+		{[]string{"review", "d.md", "--agent-version", ""}, clientVersionError("")},
+		{[]string{"tool-key", "sign_off"}, toolsError([]string{"sign_off"})},
+		{[]string{"review", "d.md", "--agent-version", "6-preview", "--data-use-category", "customer.records"}, "no demo-keys.json here"},
+	} {
+		run := exec.Command(os.Args[0], append([]string{"-test.run=TestHelperRunsTheProgram", "--"}, c.args...)...)
+		run.Dir = t.TempDir()
+		run.Env = append(os.Environ(), "CLAIMS_REVIEW_RUN_MAIN=1", "CLAIMS_REVIEW_REPO="+repo, "CLAIMS_REVIEW_REGISTRY_RECORD_HASH=")
+		out, runErr := run.CombinedOutput()
+		var exitErr *exec.ExitError
+		if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 1 || !strings.Contains(string(out), "claims-review: "+c.want) {
+			t.Errorf("%v: want exit 1 with %q, got %v: %s", c.args, c.want, runErr, out)
+		}
+	}
+}
+
+// The files hold what the server sent, every field and number kept, even one
+// this SDK does not name.
+func TestSummaryAndResponseTimesKeepEveryFieldTheServerSent(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	summary := `{"z_later_field":12345678901234567890,"format":"verdifax.period-summary.v1","account":"account-7","head_sequence":4,"head_hash":"` + hash +
+		`","head_statement_hash":"` + hash + `","figures":[],"summary_hash":"` + hash + `"}`
+	head := `{"z_later_field":"kept","format":"verdifax.feed-head.v1","account":"account-7","sequence":4,"head_hash":"` + hash +
+		`","stated_at":"2026-11-24T00:00:00Z","head_statement_hash":"` + hash + `"}`
+	report := `{"z_later_field":12345678901234567890,"form":"verdifax.response-times.v1","feed":[{"b":1,"a":2}]}`
+	var asked []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.Method+" "+r.URL.RequestURI())
+		switch r.Method + " " + r.URL.Path {
+		case "POST /account/summaries":
+			_, _ = io.WriteString(w, `{"id":3,"reused":false,"summary":`+summary+`}`)
+		case "GET /account/summaries/3":
+			_, _ = io.WriteString(w, summary)
+		case "GET /account/summaries/3/head":
+			_, _ = io.WriteString(w, head)
+		case "GET /account/summaries/3/report.pdf":
+			_, _ = io.WriteString(w, "%PDF-1.7\n\xff\x00binary")
+		case "GET /account/signoffs/response-times":
+			_, _ = io.WriteString(w, report)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("VERDIFAX_BASE_URL", server.URL)
+	t.Chdir(t.TempDir())
+	_, signer, genErr := verdifax.GenerateRequestKey()
+	if genErr != nil {
+		t.Fatal(genErr)
+	}
+	writePrivate("demo-keys.json", canonical(map[string]any{"owner": map[string]any{"secret": "vfx_case", "signing_key": hex.EncodeToString(signer)}}))
+	const start, end = "2026-11-01T00:00:00Z", "2026-11-02T00:00:00Z"
+	cmdSummary(context.Background(), start, end)
+	cmdResponseTimes(context.Background(), start, end)
+	for file, want := range map[string]string{"summary.json": summary, "summary-head.json": head, "response-times.json": report} {
+		var got bytes.Buffer
+		if compactErr := json.Compact(&got, readFile(file)); compactErr != nil || got.String() != want {
+			t.Errorf("%s holds %s, the server sent %s (%v)", file, got.String(), want, compactErr)
+		}
+	}
+	if pdf := readFile("summary.pdf"); string(pdf) != "%PDF-1.7\n\xff\x00binary" {
+		t.Errorf("summary.pdf holds %q", pdf)
+	}
+	if last := asked[len(asked)-1]; !strings.Contains(last, "pack=1") {
+		t.Errorf("the report was asked for without its feed: %s", last)
 	}
 }
 

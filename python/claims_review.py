@@ -17,6 +17,8 @@ Commands (the same in every language of this repository):
   claims-review setup                              owner key in VERDIFAX_OWNER_KEY
   claims-review review DRAFT.md [--model ID]        model key in ANTHROPIC_API_KEY
   claims-review review DRAFT.md --without-actor     the gate step names no agent
+  claims-review review DRAFT.md --agent-version V   another declared agent version, for a person's sign-off
+  claims-review review DRAFT.md --data-use-category C   another declared data category, refused at intake
   claims-review sign-off JOB_ID approve|reject [--note TEXT] [--approver NAME]
   claims-review sign-off --receipt RUN_ID approve|reject [--note TEXT] [--approver NAME]
   claims-review publish JOB_ID | publish --receipt RUN_ID
@@ -28,6 +30,10 @@ Commands (the same in every language of this repository):
   claims-review key-revoke [--holder]                       the owner revokes the agent key, or the holder
   claims-review delete-step JOB_ID STEP                     the owner deletes one step
   claims-review webhook-subscribe URL | webhook-list | webhook-remove
+  claims-review account-stop [--reason TEXT] | account-resume [--reason TEXT]
+  claims-review tool-key TOOL,TOOL                          the owner gives a key a list of tools
+  claims-review response-times START END                    RFC 3339 times, counted from the feed
+  claims-review summary START END                           the period's board summary, ended 15 minutes ago or more
   claims-review feed
   claims-review verify-commands JOB_ID
 
@@ -38,7 +44,9 @@ Files, in the working folder: demo-keys.json and approver-key.json (0600),
 approver.txt, account-history.json, records/<job_id>/*.json with payloads/,
 signals.json; approver-<name>-key.json (0600), approver-<name>.txt and
 approvers.json; account-keys.json; webhook.json (0600),
-webhooks.json and webhook-deliveries.json.
+webhooks.json and webhook-deliveries.json; account-stop.json, account-resume.json,
+tool-key.json (0600), response-times.json, summary.json, summary-head.json and
+summary.pdf.
 """
 
 from __future__ import annotations
@@ -69,7 +77,7 @@ ROUTE_VERDICT = "claims-review/v1/verdict"
 OBJECT_PREFIX = "claims-review/v1/"
 LEVELS = ("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "TOP_SECRET", "TS_SCI")
 VERDICTS = ("pass", "fail", "unanswered")
-MIN_VERIFIER = "v0.36.0"
+MIN_VERIFIER = "v0.39.0"
 # Anthropic's SDKs retry a dropped connection, 408, 409, 429 and any 5xx, but
 # only twice by default, waiting half a second then one second. That is too
 # short: on November 13, 2026 a 503 from the model API outlasted it and ended
@@ -87,12 +95,15 @@ ANSWERS_FOLDER = "answers"
 # The text the server's AI review checked for each step, as the server
 # returned it once: a reader re-runs the review's check from these files.
 TRACES_FOLDER = "traces"
-# The account policy setup activates; v1 to v3 stay for records sealed
+# The account policy setup activates; v1 to v4 stay for records sealed
 # under them. v3 requires a reviewed AI answer on every step after the gate;
 # v4 adds that every step names its agent (required_attested_fields), that
 # each verdict needs a person's sign-off, and that every step after the gate
-# passes its declared data checks.
-POLICY_FILE = "claims-review-v4.json"
+# passes its declared data checks; v5 adds that every step declares its data
+# use within the policy's codes, that the policy watches the agent's declared
+# version and requires a person's sign-off on a verdict from a version it has
+# not approved, its own review date, and the sign-off target its results seal.
+POLICY_FILE = "claims-review-v5.json"
 # The rule set's pinned hash, which the rule_set_pinned data check compares.
 RULE_SET_SHA256 = "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98ae7"
 # The data checks every step declares in policy_context.data_quality, each
@@ -100,6 +111,20 @@ RULE_SET_SHA256 = "a2afb580a203ccbd084645cfbbce532dd7eaf1d2dbeaa49fd008f66a91f98
 # sealed at intake) and rule_set_pinned (the rule set's hash is the pin).
 DATA_QUALITY_CHECKS = ("draft_unchanged", "rule_set_pinned")
 DATA_QUALITY_SOURCE = "claims-review draft and rule set"
+# The data use every step declares in policy_context.data_use, in the demo's
+# own codes: Verdifax seals the declaration as made and judges none of it.
+DATA_USE_PURPOSE = "claims.review"
+DATA_USE_BASIS = "internal:demo"
+DATA_USE_CATEGORY = "draft.text"
+DATA_USE_CODE = re.compile(r"[a-z0-9][a-z0-9._:-]{0,63}")
+# The agent's own declared name and version, sealed in attested_context as
+# declared, not verified. The policy watches them: a version it did not approve
+# is admitted only for a person's sign-off.
+CLIENT_NAME = "claims-review"
+CLIENT_VERSION = "5"
+# The tools an agent key may be given (verdifax-mcp's names), and account_stop.
+GRANTABLE_TOOLS = ("account_stop", "get_record", "get_signoffs", "list_pending_signoffs", "list_records", "prepare_signoff",
+                   "read_feed", "seal_decision", "test_policy", "verify_feed", "verify_record")
 # The owner's two blocks on Verdifax, and their values.
 ACCOUNT_SETTINGS = ("owner-replacement", "verdifax-deletion")
 SETTING_VALUES = ("allowed", "blocked")
@@ -241,6 +266,35 @@ def data_quality(intake_draft_sha256: str, draft_sha256_now: str, rule_set_hash:
     return {"source": DATA_QUALITY_SOURCE, "as_of": as_of, "checks": [
         {"name": DATA_QUALITY_CHECKS[0], "result": result(draft_sha256_now == intake_draft_sha256)},
         {"name": DATA_QUALITY_CHECKS[1], "result": result(rule_set_hash == RULE_SET_SHA256)}]}
+
+
+def data_use(category: str) -> dict[str, Any]:
+    """The data use a step declares, in the demo's own codes."""
+    return {"purpose": DATA_USE_PURPOSE, "basis": DATA_USE_BASIS, "categories": [category]}
+
+
+def data_use_error(category: str) -> Optional[str]:
+    """Why a declared data category is refused before anything is sent, or None."""
+    if not DATA_USE_CODE.fullmatch(category):
+        return "the data category must be a code of 1 to 64 lowercase letters, digits, dots, underscores, colons or hyphens"
+    return None
+
+
+def client_version_error(version: str) -> Optional[str]:
+    """Why a declared agent version is refused before anything is sent, or None."""
+    if not 1 <= len(version) <= 128 or any(ord(c) < 0x20 or ord(c) > 0x7E for c in version):
+        return "the agent version must be 1 to 128 characters of printable ASCII"
+    return None
+
+
+def tools_error(tools: list[str]) -> Optional[str]:
+    """Why a tool list is refused before anything is sent, or None."""
+    if not tools or len(set(tools)) != len(tools):
+        return "name each tool once, separated by commas"
+    for tool in tools:
+        if tool not in GRANTABLE_TOOLS:
+            return "%s is not a tool a key can be given: %s" % (tool, ", ".join(GRANTABLE_TOOLS))
+    return None
 
 
 def setting_error(setting: str, value: str) -> Optional[str]:
@@ -432,6 +486,9 @@ def measured_cost(model: str, input_tokens: int, output_tokens: int) -> Optional
 # ── review ─────────────────────────────────────────────────────────────────
 
 def cmd_review(args: argparse.Namespace) -> None:
+    for problem in (data_use_error(args.data_use_category), client_version_error(args.agent_version)):
+        if problem:
+            fail(problem)
     registry_record = registry_record_hash(os.environ.get(REGISTRY_RECORD_ENV))
     keys = load_keys()
     agent = client_for(keys["agent"])
@@ -448,7 +505,13 @@ def cmd_review(args: argparse.Namespace) -> None:
         and the data checks, computed again now, the draft re-read."""
         now_hash = sha256_hex(read_input(draft_path).encode("utf-8"))
         return {"object_type": "text", "object_id": OBJECT_PREFIX + step, "classification": level,
-                "data_quality": data_quality(draft_hash, now_hash, rule_set_hash, read_at)}
+                "data_quality": data_quality(draft_hash, now_hash, rule_set_hash, read_at),
+                "data_use": data_use(args.data_use_category)}
+
+    def attested(**fields: Any) -> verdifax.AttestedContext:
+        """The step's attested context: the agent, its declared name and version, and the step's own fields."""
+        return verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, client_name=CLIENT_NAME,
+                                        client_version=args.agent_version, **fields)
     level = draft_classification(draft)
     answers = Answers(args.answers)
     now = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -463,7 +526,7 @@ def cmd_review(args: argparse.Namespace) -> None:
         # The gate step names its agent, as policy v4 requires of every step;
         # --without-actor leaves the name out on purpose, so the policy
         # refuses the draft here, before any model is called.
-        agent_named = None if args.without_actor else verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID)
+        agent_named = None if args.without_actor else attested()
         intake = job.step("intake", after=[], payload=canonical(intake_payload), program_id=PROGRAM_ID, route_id=ROUTE_INTAKE,
                           registry_record_hash=registry_record, attested_context=agent_named,
                           policy_context=context("intake"))
@@ -504,7 +567,7 @@ def cmd_review(args: argparse.Namespace) -> None:
         claims_step = job.step("claims", after=["intake"], payload=canonical(claims_payload), program_id=PROGRAM_ID,
                                route_id=ROUTE_CLAIMS, registry_record_hash=registry_record, ai_output_text=answer_texts["claims"],
                                request_substance=usage_substance(listed),
-                               attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
+                               attested_context=attested(model_provider="anthropic",
                                                                          model_name=listed["model"], prompt_hash=claims_prompt_hash,
                                                                          decision_kind="claims.list",
                                                                          decision_result=str(len(listed["claims"]))),
@@ -537,7 +600,7 @@ def cmd_review(args: argparse.Namespace) -> None:
             receipt = job.step(rule["id"], after=["claims"], payload=canonical(payload), program_id=PROGRAM_ID, route_id=ROUTE_RULE,
                                registry_record_hash=registry_record, ai_output_text=answer_texts[rule["id"]],
                                request_substance=usage_substance(answer),
-                               attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
+                               attested_context=attested(model_provider="anthropic",
                                                                          model_name=answer["model"], prompt_hash=prompt_hash,
                                                                          decision_kind="claims.rule_check", decision_result=answer["verdict"]),
                                policy_context=context(rule["id"]))
@@ -580,7 +643,7 @@ def cmd_review(args: argparse.Namespace) -> None:
         final = job.step("verdict", after=[r["id"] for r in rules], final=True, payload=canonical(verdict_payload), program_id=PROGRAM_ID,
                          route_id=ROUTE_VERDICT, registry_record_hash=registry_record, ai_output_text=answer_texts["verdict"],
                          request_substance=usage_substance(explained),
-                         attested_context=verdifax.AttestedContext(attested=True, actor_id=ACTOR_ID, model_provider="anthropic",
+                         attested_context=attested(model_provider="anthropic",
                                                                    model_name=explained["model"], prompt_hash=verdict_prompt_hash,
                                                                    decision_kind="claims.verdict", decision_result=verdict),
                          policy_context=context("verdict"))
@@ -965,6 +1028,64 @@ def cmd_webhook_list(_: argparse.Namespace) -> None:
     print("%d webhook(s); their deliveries are in webhook-deliveries.json" % len(hooks))
 
 
+# ── the account stop, tool-listed keys, response times, board summary ──────
+# The stop, its resume and a tool-listed key are sealed in the account's feed.
+# The response-time report and the board summary are counted from that feed,
+# and verdifax-verify counts each of them again.
+
+def cmd_account_stop(args: argparse.Namespace) -> None:
+    """The owner's stop on the account, signed with the owner's request key.
+    Every new run is refused with a sealed receipt until the owner resumes."""
+    answer = owner_client().stop_account(reason=args.reason)
+    write_json(Path("account-stop.json"), answer["account_stop"])
+    print("the account is stopped; the stop is sealed in the account's feed and in account-stop.json")
+
+
+def cmd_account_resume(args: argparse.Namespace) -> None:
+    """The owner lifts the owner's stop, signed with the owner's request key."""
+    answer = owner_client().resume_account(reason=args.reason)
+    write_json(Path("account-resume.json"), answer["account_stop"])
+    print("the account runs again; the resume is sealed in the account's feed and in account-resume.json")
+
+
+def cmd_tool_key(args: argparse.Namespace) -> None:
+    """A member key the owner gives a list of tools, sealed when the key is
+    made; the server refuses the key everything else."""
+    tools = args.tools.split(",")
+    if tools_error(tools):
+        fail(tools_error(tools))
+    path = Path("tool-key.json")
+    if path.exists():
+        fail("tool-key.json exists here; the tool-listed key is already made")
+    made = owner_client().create_account_key("claims-review-tools", allowed_tools=tools)
+    signer = verdifax.generate_request_key()
+    holder = verdifax.VerdifaxClient(base_url=base_url(), api_key=made["secret"], signing_key=signer.private_key)
+    holder.register_request_key()
+    write_private(path, json.dumps({"id": made["id"], "secret": made["secret"], "signing_key": signer.private_key.hex(),
+                                    "allowed_tools": made["allowed_tools"]}, indent=2) + "\n")
+    print("key %s may use %s and nothing else; its list is sealed in the account's feed" % (made["id"], ", ".join(made["allowed_tools"])))
+
+
+def cmd_response_times(args: argparse.Namespace) -> None:
+    """How long each result waited for a person's sign-off, with the feed it was counted from."""
+    report = owner_client().get_response_times(args.start, args.end, pack=True)
+    write_json(Path("response-times.json"), report)
+    print("response times for %s to %s are in response-times.json" % (args.start, args.end))
+    print("verify: verdifax-verify --signals response-times.json --response-times --feed-head-max-age %s" % SAVED_HEAD_MAX_AGE)
+
+
+def cmd_summary(args: argparse.Namespace) -> None:
+    """The period's board summary, sealed on the public log, its head statement and its PDF."""
+    owner = owner_client()
+    made = owner.create_summary(args.start, args.end)
+    number = int(made["id"])
+    write_json(Path("summary.json"), owner.get_summary(number))
+    write_json(Path("summary-head.json"), owner.get_summary_head(number))
+    Path("summary.pdf").write_bytes(owner.download_summary_report(number))
+    print("board summary %d for %s to %s is in summary.json, with its head statement and summary.pdf" % (number, args.start, args.end))
+    print("verify, after `feed`: verdifax-verify --summary summary.json --summary-head summary-head.json --signals signals.json --feed-head-max-age %s" % SAVED_HEAD_MAX_AGE)
+
+
 # ── feed ───────────────────────────────────────────────────────────────────
 
 def cmd_webhook_remove(_: argparse.Namespace) -> None:
@@ -1094,6 +1215,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     review.add_argument("draft")
     review.add_argument("--model", default=DEFAULT_MODEL)
     review.add_argument("--answers", help="recorded answers for tests against a local server")
+    review.add_argument("--agent-version", default=CLIENT_VERSION, help="the agent's declared version; a version the policy did not approve needs a person's sign-off")
+    review.add_argument("--data-use-category", default=DATA_USE_CATEGORY, help="the declared data category; one the policy does not allow is refused")
     review.add_argument("--without-actor", action="store_true", help="send the gate step with no agent name, so policy v4 refuses it")
     review.set_defaults(fn=cmd_review)
     sign = sub.add_parser("sign-off")
@@ -1133,6 +1256,18 @@ def main(argv: Optional[list[str]] = None) -> None:
     hook.set_defaults(fn=cmd_webhook_subscribe)
     sub.add_parser("webhook-list").set_defaults(fn=cmd_webhook_list)
     sub.add_parser("webhook-remove").set_defaults(fn=cmd_webhook_remove)
+    for name, fn in (("account-stop", cmd_account_stop), ("account-resume", cmd_account_resume)):
+        stop_cmd = sub.add_parser(name)
+        stop_cmd.add_argument("--reason", help="only its hash is sent and sealed")
+        stop_cmd.set_defaults(fn=fn)
+    tool_key = sub.add_parser("tool-key")
+    tool_key.add_argument("tools", help="the tools the key may use, separated by commas")
+    tool_key.set_defaults(fn=cmd_tool_key)
+    for name, fn in (("response-times", cmd_response_times), ("summary", cmd_summary)):
+        period = sub.add_parser(name)
+        period.add_argument("start", help="the period's start, RFC 3339")
+        period.add_argument("end", help="the period's end, RFC 3339")
+        period.set_defaults(fn=fn)
     sub.add_parser("feed").set_defaults(fn=cmd_feed)
     verify = sub.add_parser("verify-commands")
     verify.add_argument("job_id")

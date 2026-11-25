@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "1.6.0",
-    "verdifax": "1.17.1",
+    "verdifax": "1.18.0",
     "zod": "4.6.7"
   }
 }
